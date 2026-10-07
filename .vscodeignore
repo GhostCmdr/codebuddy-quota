@@ -1,0 +1,35 @@
+.vscode/**
+src/**
+test/**
+scripts/**
+preview/**
+legacy/
+legacy/**
+# agent 开发规范：只给改这个仓库的 agent 看，绝不能跟着包发给用户
+AGENTS.md
+node_modules/**
+**/*.map
+**/*.ts
+.git/**
+.github/**
+.gitignore
+*.vsix
+tsconfig.json
+assets/source/
+build/
+
+# 本地代码索引/IDE 助手的产物。git 侧已经忽略了，但 vsce 只看本文件：
+# 漏了这几行，本机 `npm run package` 出的包会带上整份仓库符号索引、
+# daemon.pid（含本机路径）和 mcp 配置，装的人解压就能看见。
+.arts
+.arts/**
+.codeartsdoer
+.codeartsdoer/**
+.codegraph
+.codegraph/**
+
+# 同一类坑：漏了这几行，本机打的包会带上内部审查文档（progress.md、任务简报、
+# 各任务报告、review diff）和变异测试没清掉的 extension.mut.js。
+.superpowers
+.superpowers/**
+**/*.mut.js

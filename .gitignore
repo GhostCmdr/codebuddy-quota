@@ -1,0 +1,21 @@
+node_modules/
+out/
+*.vsix
+build/
+
+# 预览与量测脚本的生成物（跑 preview/ 下的脚本会重新生成）
+preview/_*.png
+preview/_*.html
+
+# 调稿期的一次性量测脚本（下划线前缀）；正式的量测工具放 preview/
+scripts/_*
+
+# 编辑器与系统噪音
+.DS_Store
+Thumbs.db
+*.log
+
+# CodeArts / CodeGraph 本地索引与临时日志
+.arts/
+.codeartsdoer/
+.codegraph/

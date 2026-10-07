@@ -1,0 +1,53 @@
+{
+  "name": "codebuddy-quota",
+  "displayName": "CodeBuddy Quota",
+  "description": "CodeBuddy 积分余量查看器：在状态栏显示 CodeBuddy 积分使用情况，悬停查看积分浮窗",
+  "version": "0.1.2",
+  "publisher": "GhostCmdr",
+  "license": "MIT",
+  "icon": "resources/icon.png",
+  "galleryBanner": { "color": "#3a3a6e", "theme": "dark" },
+  "repository": { "type": "git", "url": "https://github.com/GhostCmdr/codebuddy-quota.git" },
+  "bugs": { "url": "https://github.com/GhostCmdr/codebuddy-quota/issues" },
+  "homepage": "https://github.com/GhostCmdr/codebuddy-quota#readme",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other", "Visualization"],
+  "keywords": ["CodeBuddy", "WorkBuddy", "credits", "quota", "statusbar", "usage", "积分", "余量", "额度", "腾讯云代码助手"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "icons": {
+      "codebuddy-sparkle": {
+        "description": "CodeBuddy 积分",
+        "default": { "fontPath": "./assets/codebuddy-sparkle.ttf", "fontCharacter": "\\E001" }
+      }
+    },
+    "commands": [
+      { "command": "codebuddyquota.refresh", "title": "CodeBuddy Quota: 刷新积分" },
+      { "command": "codebuddyquota.checkin", "title": "CodeBuddy Quota: 立即签到" },
+      { "command": "codebuddyquota.clearManualToken", "title": "CodeBuddy Quota: 清除保管箱里的手动 Token" }
+    ],
+    "configuration": {
+      "title": "CodeBuddy Quota",
+      "properties": {
+        "codebuddyquota.refreshInterval": { "category": "CodeBuddy Quota", "type": "number", "default": 30, "minimum": 0, "maximum": 1440, "description": "积分自动刷新间隔（分钟），0 关闭。" },
+        "codebuddyquota.manualToken": { "category": "CodeBuddy Quota", "type": "string", "default": "", "format": "password", "markdownDescription": "手动 accessToken。**填了就以它为准**（最高优先，重复填写自动覆盖旧值）；填一次即收进加密保管箱并清空本项。" },
+        "codebuddyquota.autoCheckin": { "category": "CodeBuddy Quota", "type": "boolean", "default": true, "description": "自动每日签到。" },
+        "codebuddyquota.buddyTravel": { "category": "CodeBuddy Quota", "type": "boolean", "default": true, "description": "自动喵喵旅行领积分。" },
+        "codebuddyquota.detailRows": { "category": "CodeBuddy Quota", "type": "number", "default": 3, "minimum": 1, "maximum": 6, "description": "积分包显示数量，按到期时间升序，超出的不显示。可调 `1` ~ `6`。" }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "test": "npm run test:unit && npm run test:layout",
+    "pretest:unit": "npm run compile",
+    "test:unit": "node --test --test-timeout=60000 \"test/**/*.test.js\"",
+    "pretest:layout": "npm run compile",
+    "test:layout": "node preview/measure-pixels.js --check && node preview/measure-columns.js",
+    "package": "npx --yes @vscode/vsce package"
+  },
+  "devDependencies": { "@types/node": "^20.11.0", "@types/vscode": "^1.85.0", "typescript": "^5.4.5" }
+}
