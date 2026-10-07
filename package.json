@@ -2,7 +2,7 @@
   "name": "codebuddy-quota",
   "displayName": "CodeBuddy Quota",
   "description": "CodeBuddy 积分余量查看器：在状态栏显示 CodeBuddy 积分使用情况，悬停查看积分浮窗",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "GhostCmdr",
   "license": "MIT",
   "icon": "resources/icon.png",
