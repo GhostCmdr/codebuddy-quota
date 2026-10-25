@@ -5,9 +5,11 @@ on:
     tags:
       - 'v*'
 
-# contents: write 给「挂到 GitHub Release」那步上传 .vsix 用；VSCE_PAT / OVSX_PAT 走 secret，与本权限无关。
+# contents: write 给「挂到 GitHub Release」那步上传 .vsix 用；VSCE_PAT 走 secret，与本权限无关。
+# id-token: write 是给 Open VSX 的受信发布用的：让 Actions 能拿到 OIDC 身份令牌去换临时发布凭证。
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   publish:
@@ -84,8 +86,6 @@ jobs:
           npx --yes @vscode/vsce publish --no-dependencies --pat "$VSCE_PAT"
 
       - name: 发布到 Open VSX
-        env:
-          OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
           vsix="$(ls ./*.vsix | head -n1)"
           version="$(node -p "require('./package.json').version")"
@@ -97,15 +97,6 @@ jobs:
             echo "v$version 已在 Open VSX 上（重复推 tag），跳过发布。"
             exit 0
           fi
-          # 实测：ovsx 在**空令牌**下不会报错——verify-pat 会打印「PAT valid」并返回 0，
-          # 于是 publish 也静默成功、什么都没发出去（首次发布就是这么假绿了一次）。
-          # 所以真要发布之前自己拦一道：secret 没配或值为空直接红。
-          # 位置放在「已存在则跳过」之后：版本已在 Open VSX 上时不该因为 secret 缺失而误红。
-          if [ -z "$OVSX_PAT" ]; then
-            echo "secret OVSX_PAT 缺失或为空：拒绝继续（空令牌下 ovsx 会假成功）" >&2
-            exit 1
-          fi
-          # 用长期令牌发布。open-vsx.org 的「可信发布（OIDC）」登记是绑到**已存在的扩展**上的：
-          # 首发时这个扩展还没出现在 Open VSX 上、选不到它（其页面原话「扩展只能有一个」），
-          # 所以第一次发布走 OVSX_PAT；等扩展上线后想换成受信发布再回来登记。
-          npx --yes ovsx publish "$vsix" -p "$OVSX_PAT"
+          # 受信发布：用上面 id-token: write 拿到的 OIDC 身份令牌现场换一张短期发布凭证，
+          # 不再需要 OVSX_PAT 这个长期 secret。对应 open-vsx.org 上命名空间 GhostCmdr 的注册项。
+          npx --yes ovsx publish "$vsix" --trusted-publishing

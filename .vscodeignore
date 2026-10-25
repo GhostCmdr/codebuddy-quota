@@ -33,3 +33,7 @@ build/
 .superpowers
 .superpowers/**
 **/*.mut.js
+
+# Qoder 余量看板等本地工具的产物（credits 报告与 canvas 草稿），同样不该进包
+.qoder-credits
+.qoder-credits/**
