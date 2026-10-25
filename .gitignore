@@ -20,5 +20,8 @@ Thumbs.db
 .codeartsdoer/
 .codegraph/
 
+# Qoder credits-inspector 的本地报告产物（JSON + 按会话标题命名的 canvas），可随时重新生成
+.qoder-credits/
+
 # 本机 agent 开发规范：只留本机，不进仓库
 AGENTS.md
