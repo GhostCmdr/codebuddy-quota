@@ -1,11 +1,11 @@
-name: publish
+name: 自动打包上架市场
 
 on:
   # 手动推 tag 仍然可以发布（兜底入口，也方便单独重发某一版）
   push:
     tags:
       - 'v*'
-  # 由 release.yml 在「push main 且 CHANGELOG 有改动」时调用
+  # 由 changelog.yml 在「push main 且 CHANGELOG 有改动」时调用
   workflow_call:
 
 # contents: write 给「挂到 GitHub Release」那步上传 .vsix 用；VSCE_PAT 走 secret，与本权限无关。
@@ -32,7 +32,7 @@ jobs:
       - name: 校验版本一致
         run: |
           version="$(node -p "require('./package.json').version")"
-          # 只有「推 tag」入口才有 tag 可对；被 release.yml 调用时没有 tag 上下文
+          # 只有「推 tag」入口才有 tag 可对；被 changelog.yml 调用时没有 tag 上下文
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             tag="${GITHUB_REF_NAME#v}"
             if [ "$version" != "$tag" ]; then

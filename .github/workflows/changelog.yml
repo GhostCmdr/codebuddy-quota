@@ -1,0 +1,139 @@
+name: 推送校验自动化
+
+# 只在 CHANGELOG 有改动时启动：日常改代码推送不会触发任何发布动作。
+on:
+  push:
+    branches: [main]
+    paths: ['CHANGELOG.md']
+  # 补发入口：tag 已建、但某个市场那一步失败时，手动跑一次并勾选 force_publish
+  workflow_dispatch:
+    inputs:
+      force_publish:
+        description: '按当前 package.json 版本重新发布（补发失败的市场步骤）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+# 连续两次推送时排队执行，避免同时判定「tag 不存在」而重复建 tag
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 判定这一轮该做什么：
+  #  - 顶部版本没有 tag → 正式发版（打 tag、建 Release、发市场）
+  #  - 顶部版本已发过 → 只比对说明，不一致时更新
+  #  - 说明比对覆盖 CHANGELOG 最新的两个版本，更早的版本不动
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.decide.outputs.version }}
+      publish: ${{ steps.decide.outputs.publish }}
+      notes_versions: ${{ steps.decide.outputs.notes_versions }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_PUBLISH: ${{ inputs.force_publish }}
+        run: |
+          set -euo pipefail
+
+          # CHANGELOG 新版本在上：取最新的两个版本号参与判定
+          mapfile -t versions < <(grep -E '^## [0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$' CHANGELOG.md | sed -E 's/^##[[:space:]]+//;s/[[:space:]]+$//' | head -2)
+          if [ "${#versions[@]}" -eq 0 ]; then
+            echo "CHANGELOG 里找不到 x.y.z 形式的版本标题" >&2
+            exit 1
+          fi
+          top="${versions[0]}"
+          echo "version=$top" >> "$GITHUB_OUTPUT"
+          echo "CHANGELOG 顶部版本：$top"
+          echo "参与判定的版本：${versions[*]}"
+
+          norm() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(s.replace(/\s+$/,"")))'; }
+
+          publish=false
+          notes_versions=""
+          for v in "${versions[@]}"; do
+            tag_exists=false
+            if git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null 2>&1; then
+              tag_exists=true
+            fi
+
+            # 没有 tag：只有顶部版本才允许正式发布，旧版本缺失就跳过
+            if [ "$tag_exists" = "false" ]; then
+              if [ "$v" = "$top" ]; then
+                pkg="$(node -p "require('./package.json').version")"
+                lock="$(node -p "require('./package-lock.json').version")"
+                lockpkg="$(node -p "require('./package-lock.json').packages[''].version || ''")"
+                [ "$pkg" = "$v" ] || { echo "package.json 是 $pkg，CHANGELOG 是 $v，未对齐，拒绝发布。" >&2; exit 1; }
+                [ "$lock" = "$v" ] || { echo "package-lock.json 顶层是 $lock，应为 $v。" >&2; exit 1; }
+                [ "$lockpkg" = "$v" ] || { echo "package-lock.json packages[\"\"] 是 $lockpkg，应为 $v。" >&2; exit 1; }
+                publish=true
+                echo "tag v$v 不存在：走正式发布。"
+              else
+                echo "v$v 没有对应 tag（历史版本），跳过。"
+              fi
+              continue
+            fi
+
+            # tag 有、Release 没有：顶部版本补建，旧版本不动
+            current="$(gh release view "v$v" --json body -q .body 2>/dev/null || true)"
+            if [ -z "$current" ]; then
+              if [ "$v" = "$top" ]; then
+                publish=true
+                echo "tag v$v 存在但没有 Release：补建。"
+              fi
+              continue
+            fi
+
+            # tag 与 Release 都在：比对说明，忽略尾部空白差异
+            desired="$(awk -v h="## $v" 'index($0,h)==1{c=1;next} c&&/^## /{c=0} c' CHANGELOG.md)"
+            if [ "$(printf '%s' "$current" | norm)" != "$(printf '%s' "$desired" | norm)" ]; then
+              notes_versions="$notes_versions $v"
+              echo "v$v 的 Release 说明与 CHANGELOG 不一致：待更新。"
+            else
+              echo "v$v 的 Release 说明一致，无需操作。"
+            fi
+          done
+
+          if [ "$FORCE_PUBLISH" = "true" ]; then
+            publish=true
+            echo "手动要求按当前版本重新发布 $top。"
+          fi
+
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "notes_versions=${notes_versions# }" >> "$GITHUB_OUTPUT"
+
+  # 只同步说明：不动 tag、不重打包、不发市场
+  notes:
+    needs: gate
+    if: needs.gate.outputs.notes_versions != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 同步 Release 说明
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSIONS: ${{ needs.gate.outputs.notes_versions }}
+        run: |
+          set -euo pipefail
+          for v in $VERSIONS; do
+            tag="v$v"
+            notes="$(awk -v h="## $v" 'index($0,h)==1{c=1;next} c&&/^## /{c=0} c' CHANGELOG.md)"
+            [ -n "$notes" ] || notes="本版无功能变更。"
+            gh release edit "$tag" --title "$tag" --notes "$notes"
+            echo "已更新 $tag 的 Release 说明"
+          done
+
+  # 复用 publish.yml 的发布步骤：单测 → 打包 → 建 tag/Release → 发两个市场
+  publish:
+    needs: gate
+    if: needs.gate.outputs.publish == 'true'
+    uses: ./.github/workflows/publish.yml
+    secrets: inherit
