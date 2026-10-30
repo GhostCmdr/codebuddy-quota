@@ -30,7 +30,6 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.decide.outputs.version }}
       publish: ${{ steps.decide.outputs.publish }}
       notes_versions: ${{ steps.decide.outputs.notes_versions }}
     steps:
@@ -50,7 +49,6 @@ jobs:
             exit 1
           fi
           top="${versions[0]}"
-          echo "version=$top" >> "$GITHUB_OUTPUT"
           echo "CHANGELOG 顶部版本：$top"
           echo "参与判定的版本：${versions[*]}"
 
