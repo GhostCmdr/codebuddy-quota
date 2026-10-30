@@ -1,0 +1,117 @@
+name: release
+
+# 只在 CHANGELOG 有改动时启动：日常改代码推送不会触发任何发布动作。
+on:
+  push:
+    branches: [main]
+    paths: ['CHANGELOG.md']
+  # 补发入口：tag 已建、但某个市场那一步失败时，手动跑一次并勾选 force_publish
+  workflow_dispatch:
+    inputs:
+      force_publish:
+        description: '按当前 package.json 版本重新发布（补发失败的市场步骤）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+# 连续两次推送时排队执行，避免同时判定「tag 不存在」而重复建 tag
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 判定这一轮该做什么：只有「tag 不存在」才正式发版；
+  # tag 已存在时，说明一致就什么都不做，不一致只同步 Release 正文。
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.decide.outputs.version }}
+      action: ${{ steps.decide.outputs.action }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_PUBLISH: ${{ inputs.force_publish }}
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^## ' CHANGELOG.md | sed -E 's/^##[[:space:]]+//')"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "CHANGELOG 顶部不是 x.y.z 版本号：'$version'" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          tag_exists=false
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+            tag_exists=true
+          fi
+
+          # 情况一：这个版本还没发过 → 三处版本必须对齐，然后走正式发布
+          if [ "$tag_exists" = "false" ]; then
+            pkg="$(node -p "require('./package.json').version")"
+            lock="$(node -p "require('./package-lock.json').version")"
+            lockpkg="$(node -p "require('./package-lock.json').packages[''].version || ''")"
+            [ "$pkg" = "$version" ] || { echo "package.json 是 $pkg，CHANGELOG 是 $version，未对齐，拒绝发布。" >&2; exit 1; }
+            [ "$lock" = "$version" ] || { echo "package-lock.json 顶层是 $lock，应为 $version。" >&2; exit 1; }
+            [ "$lockpkg" = "$version" ] || { echo "package-lock.json packages[\"\"] 是 $lockpkg，应为 $version。" >&2; exit 1; }
+            echo "action=publish" >> "$GITHUB_OUTPUT"
+            echo "tag v$version 不存在：走正式发布。"
+            exit 0
+          fi
+
+          # 手动补发
+          if [ "$FORCE_PUBLISH" = "true" ]; then
+            echo "action=publish" >> "$GITHUB_OUTPUT"
+            echo "手动要求按当前版本重新发布 v$version。"
+            exit 0
+          fi
+
+          # tag 有、Release 没有 → 把 Release 补建出来（发布步骤内部是幂等的）
+          current="$(gh release view "v$version" --json body -q .body 2>/dev/null || true)"
+          if [ -z "$current" ]; then
+            echo "action=publish" >> "$GITHUB_OUTPUT"
+            echo "tag v$version 存在但没有 Release：补建。"
+            exit 0
+          fi
+
+          # 情况二：tag 与 Release 都在 → 只比对说明，不一致就只改说明
+          desired="$(awk -v h="## $version" 'index($0,h)==1{c=1;next} c&&/^## /{c=0} c' CHANGELOG.md)"
+          norm() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(s.replace(/\s+$/,"")))'; }
+          if [ "$(printf '%s' "$current" | norm)" = "$(printf '%s' "$desired" | norm)" ]; then
+            echo "action=none" >> "$GITHUB_OUTPUT"
+            echo "v$version 的 Release 说明与 CHANGELOG 一致，无需操作。"
+          else
+            echo "action=notes" >> "$GITHUB_OUTPUT"
+            echo "v$version 的 Release 说明与 CHANGELOG 不一致：只更新说明。"
+          fi
+
+  # 只同步说明：不动 tag、不重打包、不发市场
+  notes:
+    needs: gate
+    if: needs.gate.outputs.action == 'notes'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 同步 Release 说明
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          notes="$(awk -v h="## $VERSION" 'index($0,h)==1{c=1;next} c&&/^## /{c=0} c' CHANGELOG.md)"
+          [ -n "$notes" ] || notes="本版无功能变更。"
+          gh release edit "$tag" --title "$tag" --notes "$notes"
+
+  # 复用 publish.yml 的发布步骤：单测 → 打包 → 建 tag/Release → 发两个市场
+  publish:
+    needs: gate
+    if: needs.gate.outputs.action == 'publish'
+    uses: ./.github/workflows/publish.yml
+    secrets: inherit

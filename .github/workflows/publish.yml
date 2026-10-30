@@ -1,9 +1,12 @@
 name: publish
 
 on:
+  # 手动推 tag 仍然可以发布（兜底入口，也方便单独重发某一版）
   push:
     tags:
       - 'v*'
+  # 由 release.yml 在「push main 且 CHANGELOG 有改动」时调用
+  workflow_call:
 
 # contents: write 给「挂到 GitHub Release」那步上传 .vsix 用；VSCE_PAT 走 secret，与本权限无关。
 # id-token: write 是给 Open VSX 的受信发布用的：让 Actions 能拿到 OIDC 身份令牌去换临时发布凭证。
@@ -26,19 +29,28 @@ jobs:
 
       - run: npm ci
 
-      - name: 校验 tag 与 package.json 版本一致
+      - name: 校验版本一致
         run: |
           version="$(node -p "require('./package.json').version")"
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$version" != "$tag" ]; then
-            echo "tag 是 v$tag，package.json 是 $version，不一致，拒绝发布。" >&2
-            exit 1
+          # 只有「推 tag」入口才有 tag 可对；被 release.yml 调用时没有 tag 上下文
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$version" != "$tag" ]; then
+              echo "tag 是 v$tag，package.json 是 $version，不一致，拒绝发布。" >&2
+              exit 1
+            fi
           fi
           # lockfile 顶层 version 失配 npm ci 不会报错，所以升版时容易漏掉它，
           # 一漏就连着几个版本没人发现。
           lock="$(node -p "require('./package-lock.json').version")"
           if [ "$lock" != "$version" ]; then
-            echo "package-lock.json 还是 $lock，package.json 是 $version。本地跑一次 npm install 对齐后再提交。" >&2
+            echo "package-lock.json 顶层是 $lock，package.json 是 $version。本地跑一次 npm install 对齐后再提交。" >&2
+            exit 1
+          fi
+          # npm 11 会同时维护 packages[""].version，两个字段失配同样会漏
+          lockpkg="$(node -p "require('./package-lock.json').packages[''].version || ''")"
+          if [ "$lockpkg" != "$version" ]; then
+            echo "package-lock.json packages[\"\"] 是 $lockpkg，package.json 是 $version。" >&2
             exit 1
           fi
 
