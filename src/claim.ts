@@ -27,8 +27,6 @@ export interface CheckinOutcome {
   state: 'claimed' | 'unclaimed' | 'unknown';
   freshlyClaimed?: boolean;
   credit?: number;
-  /** 本地守卫说今天已经领过，这次连请求都没发 */
-  skippedByGuard?: boolean;
   error?: string;
 }
 
@@ -42,7 +40,7 @@ export async function ensureCheckin(auth: Auth, api: CheckinApi, guard?: DayGuar
   if (status === 'claimed') return { state: 'claimed' };
   // 本地守卫优先于 status 字段：那字段会给出前后矛盾的值，而服务端对重复领取幂等，
   // 所以「今天成功过一次」就不再发请求。
-  if (guard && !shouldCheckin(guard.lastDate(), day)) return { state: 'claimed', skippedByGuard: true };
+  if (guard && !shouldCheckin(guard.lastDate(), day)) return { state: 'claimed' };
   if (status !== 'unclaimed') return { state: 'unknown' };
   const r = await api.checkin(auth);
   if (r.state === 'claimed') {

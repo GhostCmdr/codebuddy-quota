@@ -1,10 +1,12 @@
-import { Auth, assertAllowedCredentialTarget, authHeaders, invalidateAuth, getBillingBase, resolveBillingBase } from './auth';
+import { Auth, assertAllowedCredentialTarget, authHeaders, invalidateAuth, isInternationalAuth, preferredBillingBase, resolveBillingBase } from './auth';
 
 export interface CreditPack {
   name: string;
   remain: number;
   limit: number;
   unlimited: boolean;
+  /** 套餐包（订阅配额）与赠送/加量包的区别：赠送包的 SubProductCode 带 bonus_pack */
+  plan: boolean;
   expireTime?: string;
 }
 
@@ -20,8 +22,6 @@ export interface CheckinResult {
   error?: string;
   credit?: number;
   freshlyClaimed?: boolean;
-  /** 服务端说今天已经领过（业务码 10001）：良性结果，调用方据此记下当天不再重试 */
-  alreadyClaimed?: boolean;
 }
 
 export interface BuddyStatus {
@@ -36,6 +36,28 @@ export interface BuddyStatus {
 function num(s: unknown): number {
   const n = parseFloat(String(s ?? '0'));
   return Number.isFinite(n) ? n : 0;
+}
+
+function attrValue(a: any, key: string): string | undefined {
+  const hit = (a?.AccountAttributes ?? []).find((x: any) => x?.Key === key);
+  return typeof hit?.Value === 'string' && hit.Value ? hit.Value : undefined;
+}
+
+/**
+ * 包的显示名：网页端不直接用接口的 PackageName（那是一长串内部产品名），
+ * 而是按积分来源翻译——签到叫「Buddy 加油站签到」、growth_* 统计成「成长计划奖励」、
+ * 套餐配额显示「基础积分」。认不出的来源回落接口名，不瞎猜。
+ */
+function displayPackName(a: any): string {
+  const raw = typeof a.PackageName === 'string' && a.PackageName.trim() ? a.PackageName : '-';
+  const src = attrValue(a, 'grantSource');
+  if (src === 'daily_checkin') return 'Buddy 加油站签到';
+  if (src?.startsWith('growth_')) return '成长计划奖励';
+  const sub = typeof a.SubProductCode === 'string' ? a.SubProductCode : '';
+  if (sub && !/bonus_pack/i.test(sub)) return '基础积分';
+  // 认不出的来源回落接口名；接口名统一带「CodeBuddy个人版」/「CodeBuddy个人」前缀，展示时去掉
+  const stripped = raw.replace(/^CodeBuddy个人版?/, '').trim();
+  return stripped || raw;
 }
 
 export function shapeUsage(json: unknown): CreditsSummary {
@@ -58,27 +80,29 @@ export function shapeUsage(json: unknown): CreditsSummary {
       s = num(a.CapacitySizePrecise);
     }
     // 套餐名可能是数字/对象：非字符串一律回落，否则它会一路进到 SVG 渲染并抛 TypeError
-    const name = typeof a.PackageName === 'string' && a.PackageName.trim() ? a.PackageName : '-';
+    const name = displayPackName(a);
+    // 套餐包判据：SubProductCode 存在且不带 bonus_pack。字段缺失时按「非套餐」算——
+    // 否则国际版之类没有该字段的响应会让每一行都挂上「套餐内」标签
+    const plan = !!a.SubProductCode && !/bonus_pack/i.test(String(a.SubProductCode));
     // 定额包：容量为正；不限量包：容量字段非正（腾讯云口径未确认，防御式判定）。
-    // 定额与不限量并存时按定额部分算占比（对齐 traecn），不误报 100%。
+    // 只要出现一个不限量包，整体就按不限量算：额度用不完，再报「有限部分还剩几成」没有意义。
     if (s > 0) {
       hasFinite = true;
       remain += r;
-      if (r > 0) {
-        total += s;
-        packs.push({ name, remain: r, limit: s, unlimited: false, expireTime: a.CycleEndTime });
-      }
+      total += s;
+      // 空包也返回：分母本来就要算它，展示层再决定这一行显不显示
+      packs.push({ name, remain: r, limit: s, unlimited: false, plan, expireTime: a.CycleEndTime });
     } else {
       hasUnlimited = true;
-      packs.push({ name, remain: r, limit: s, unlimited: true, expireTime: a.CycleEndTime });
+      packs.push({ name, remain: r, limit: s, unlimited: true, plan, expireTime: a.CycleEndTime });
     }
   }
   // 一个包都没有 = 账号没切到积分计费（或返回结构变了）。此时显示 0/0 会把「没数据」伪装成「没额度」
   if (!hasFinite && !hasUnlimited) {
     throw new Error('账号没有任何积分包，可能未切换到积分计费模式');
   }
-  packs.sort((x, y) => (x.expireTime ?? '9999').localeCompare(y.expireTime ?? '9999'));
-  return { remain, total, unlimited: !hasFinite && hasUnlimited, packs };
+  packs.sort((x, y) => (x.expireTime || '9999').localeCompare(y.expireTime || '9999'));
+  return { remain, total, unlimited: hasUnlimited, packs };
 }
 
 export function shapeCheckinStatus(json: unknown): 'claimed' | 'unclaimed' {
@@ -188,16 +212,28 @@ function travelHeaders(): Record<string, string> {
   };
 }
 
-function billingBase(): string {
-  return getBillingBase() ?? 'https://www.workbuddy.cn';
+function billingBase(auth: Auth): string {
+  return preferredBillingBase(auth);
 }
 
-export async function probeBillingBase(auth: Auth, base: string): Promise<boolean> {
+/**
+ * 国内站要按包编码白名单过滤；国际站的包编码体系不同，带上国内的编码会被过滤成 0 条，
+ * 所以国际站不带 PackageCodes（实测能正常返回该账号的积分包）。
+ */
+function usageBody(pageSize: number, auth: Auth): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    PageNumber: 1, PageSize: pageSize, ProductCode: 'p_tcaca', Status: [0, 3], OnlyValidPeriod: true, NeedInUsage: true
+  };
+  if (!isInternationalAuth(auth)) body.PackageCodes = PACKAGE_CODES;
+  return body;
+}
+
+async function probeBillingBase(auth: Auth, base: string): Promise<boolean> {
   try {
     const resp = await authFetch(`${base}/billing/meter/get-user-resource`, {
       method: 'POST',
       headers: billingHeaders(base),
-      body: JSON.stringify({ PageNumber: 1, PageSize: 1, ProductCode: 'p_tcaca', Status: [0, 3], OnlyValidPeriod: true, PackageCodes: PACKAGE_CODES, NeedInUsage: true })
+      body: JSON.stringify(usageBody(1, auth))
     }, auth);
     return resp.ok;
   } catch {
@@ -211,8 +247,7 @@ async function ensureBase(auth: Auth): Promise<string> {
 
 export async function fetchUsage(auth: Auth): Promise<CreditsSummary> {
   const base = await ensureBase(auth);
-  const body = { PageNumber: 1, PageSize: 200, ProductCode: 'p_tcaca', Status: [0, 3], OnlyValidPeriod: true, PackageCodes: PACKAGE_CODES, NeedInUsage: true };
-  const resp = await authFetch(`${base}/billing/meter/get-user-resource`, { method: 'POST', headers: billingHeaders(base), body: JSON.stringify(body) }, auth);
+  const resp = await authFetch(`${base}/billing/meter/get-user-resource`, { method: 'POST', headers: billingHeaders(base), body: JSON.stringify(usageBody(200, auth)) }, auth);
   if (!resp.ok) throw apiError(`请求积分接口返回 HTTP ${resp.status}`, { httpStatus: resp.status });
   const json: any = await resp.json();
   // HTTP 200 也可能是业务失败：这时 data 是空的，直接当成功会把「取数失败」显示成 0/0
@@ -223,7 +258,7 @@ export async function fetchUsage(auth: Auth): Promise<CreditsSummary> {
 }
 
 export async function fetchCheckinStatus(auth: Auth): Promise<'claimed' | 'unclaimed' | 'unknown'> {
-  const base = billingBase();
+  const base = billingBase(auth);
   const resp = await authFetch(`${base}/billing/meter/checkin-status`, { method: 'POST', headers: billingHeaders(base), body: '{}' }, auth);
   const json = await resp.json().catch(() => null);
   if (json?.code === 10001) return 'claimed';
@@ -232,15 +267,15 @@ export async function fetchCheckinStatus(auth: Auth): Promise<'claimed' | 'uncla
 }
 
 export async function doCheckin(auth: Auth): Promise<CheckinResult> {
-  const base = billingBase();
+  const base = billingBase(auth);
   const resp = await authFetch(`${base}/billing/meter/daily-checkin`, { method: 'POST', headers: billingHeaders(base), body: '{}' }, auth);
   const json = await resp.json().catch(() => null);
   // 10001 = 今天已经领过。良性结果：不算失败，也不该让上层天天重试。
-  if (json?.code === 10001) return { state: 'claimed', alreadyClaimed: true };
+  if (json?.code === 10001) return { state: 'claimed' };
   if (!resp.ok) return { state: 'unknown', error: `HTTP_${resp.status}` };
   if (json?.code === 0) return { state: 'claimed', credit: json?.data?.credit, freshlyClaimed: true };
   const st = await fetchCheckinStatus(auth);
-  return st === 'claimed' ? { state: 'claimed', alreadyClaimed: true } : { state: 'unknown', error: `code=${json?.code ?? ''}` };
+  return st === 'claimed' ? { state: 'claimed' } : { state: 'unknown', error: `code=${json?.code ?? ''}` };
 }
 
 async function callTravel(auth: Auth, sub: string, method: string, body?: string): Promise<any> {

@@ -1,4 +1,4 @@
-import { CreditsSummary } from './api';
+import { CreditPack, CreditsSummary } from './api';
 import { pctOf, fmtCredits, formatDateTime } from './format';
 
 /* ============================ 通用工具 ============================ */
@@ -15,44 +15,28 @@ export function svgDataUri(svg: string): string {
   return 'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64');
 }
 
-/* ====================== 显示宽度 / 截断 / 列宽 ====================== */
-const WIDE_RE = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/;
-function charWidth(ch: string): number {
-  const c = ch.codePointAt(0) ?? 0;
-  if (c >= 0x1f300) return 2;
-  return WIDE_RE.test(ch) ? 2 : 1;
-}
+/* ====================== 文字宽度 / 截断 ====================== */
+/**
+ * 11px Segoe UI 400 字重下 ASCII 32..126 的实测推进宽度（无头 Chrome canvas 实测）。
+ * 不能统一按 6.1 估：大写 W 10.27、小写 i 2.66，差近 4 倍。
+ */
+const ASCII_W = [
+  3.01, 3.13, 4.31, 6.50, 5.93, 9.00, 6.10, 2.53, 3.32, 3.32, 4.59, 7.52, 2.38, 4.40, 2.38, 4.29,
+  5.93, 5.93, 5.93, 5.93, 5.93, 5.93, 5.93, 5.93, 5.93, 5.93, 2.38, 2.38, 6.10, 7.52, 6.10, 4.93,
+  10.51, 7.10, 6.31, 6.81, 7.71, 5.56, 5.37, 7.55, 7.81, 2.93, 3.93, 6.38, 5.18, 9.88, 8.23, 8.29,
+  6.16, 8.29, 6.58, 5.84, 5.76, 7.56, 6.83, 10.27, 6.49, 6.08, 6.27, 3.32, 4.17, 3.32, 7.52, 4.57,
+  2.95, 5.60, 6.47, 5.08, 6.48, 5.75, 3.44, 6.48, 6.23, 2.66, 2.66, 5.47, 2.66, 9.47, 6.23, 6.45,
+  6.47, 6.48, 3.82, 4.67, 3.73, 6.23, 5.27, 7.95, 5.05, 5.32, 4.97, 3.32, 2.63, 3.32, 7.52
+];
 
-/** CJK 全角按 2 格计算 */
-export function displayWidth(s: string): number {
-  let w = 0;
-  for (const ch of s) w += charWidth(ch);
-  return w;
-}
-
-/** 按显示宽度截断长名称，超出部分补 … */
-export function truncate(s: string, width: number): string {
-  if (displayWidth(s) <= width) return s;
-  let out = '';
-  let w = 0;
-  for (const ch of s) {
-    const cw = charWidth(ch);
-    if (w + cw > width - 1) break;
-    out += ch;
-    w += cw;
-  }
-  return out + '…';
-}
-
-/** 11px 字号下各字形的推进宽度（无头 Chrome 像素扫描实测，整串误差 <1px） */
+/** 11px 下的推进宽度（ASCII 查表、CJK 11、省略号 8.06、∞ 8.99） */
 function glyphPx(ch: string): number {
   const c = ch.codePointAt(0) ?? 0;
+  if (c >= 32 && c <= 126) return ASCII_W[c - 32];
+  if (ch === '…') return 8.06;
+  if (ch === '∞') return 8.99;
+  if (c >= 0x1f300) return 12;
   if (c >= 0x2e80) return 11;
-  if (ch === ' ') return 2.8;
-  if (ch === ',' || ch === '.') return 3.1;
-  if (ch === '/') return 3.4;
-  if (ch === 'w') return 7.9;
-  if (ch === '…') return 8.5;
   return 6.1;
 }
 
@@ -62,20 +46,22 @@ export function textPx(s: string): number {
   return px;
 }
 
-/** 额度列右锚点：名称列满截断 62 + 列间距 20 + 额度列最宽 62.6，到期列(≤86.1)左缘仍余 20 */
-const QUOTA_RIGHT = 145.6;
-const COL_GAP_PX = 20;
-/** 1 个显示格（半个汉字）在 11px 字号下的推进宽度 */
-const CELL_PX = 5.5;
-/** 省略号实测 8.5px 而 displayWidth 只记 1 格（5.5px），故预留 3px 余量 */
-const ELLIPSIS_EXTRA_PX = 3;
-const NAME_CELLS_MAX = 11;
-const NAME_CELLS_MIN = 6;
-
-/** 名称列可用格数：额度串越宽名称列越短，两列字面间距恒为 20px */
-export function nameCells(quotaText: string): number {
-  const room = QUOTA_RIGHT - COL_GAP_PX - textPx(quotaText) - ELLIPSIS_EXTRA_PX;
-  return Math.min(NAME_CELLS_MAX, Math.max(NAME_CELLS_MIN, Math.floor(room / CELL_PX)));
+/**
+ * 按像素预算截断：整名放得下就原样返回；否则先扣省略号宽度再逐字累加，
+ * 补 … 前去掉尾部空格（`Subscription ` → `Subscription…`）。
+ */
+export function truncatePx(s: string, roomPx: number): string {
+  if (textPx(s) <= roomPx) return s;
+  const room = roomPx - glyphPx('…');
+  let out = '';
+  let w = 0;
+  for (const ch of s) {
+    const cw = glyphPx(ch);
+    if (w + cw > room) break;
+    out += ch;
+    w += cw;
+  }
+  return out.replace(/\s+$/, '') + '…';
 }
 
 export interface PanelData {
@@ -83,28 +69,41 @@ export interface PanelData {
   total: number;
   pct: number;
   unlimited: boolean;
-  packs: Array<{ name: string; remain: number; limit: number; pct: number; unlimited: boolean; expiry: string }>;
+  packs: Array<{ name: string; remain: number; limit: number; unlimited: boolean; plan: boolean; expiry: string }>;
   checkin: string;
   updatedAt: string;
+  /** 账号昵称（取自 token 的 nickname）；取不到就是空串，整行不渲染 */
+  account: string;
 }
 
-/** 到期列到分钟；不限量包占比按 100 显示 */
-export function buildPanelData(summary: CreditsSummary, checkin: string, updatedAt: string): PanelData {
+/** 明细行排序：不限量包始终置顶；开了订阅套餐置顶时套餐包更靠前。组内按到期升序，无到期排最后 */
+function orderPacks(packs: CreditPack[], pinPlan: boolean): CreditPack[] {
+  const rank = (p: CreditPack) => (pinPlan ? (p.plan ? 0 : p.unlimited ? 1 : 2) : p.unlimited ? 0 : 1);
+  return [...packs].sort((a, b) =>
+    rank(a) - rank(b) || (a.expireTime || '9999').localeCompare(b.expireTime || '9999'));
+}
+
+/** 到期列到分钟；不限量时整体占比记 100 */
+export function buildPanelData(summary: CreditsSummary, checkin: string, updatedAt: string, account = '', pinPlan = false): PanelData {
+  // 空包不显示；开了订阅套餐置顶时套餐包豁免，用完了也留在第一行
+  const visible = summary.packs.filter((p) => p.unlimited || p.remain > 0 || (pinPlan && p.plan));
+  const ordered = orderPacks(visible, pinPlan);
   return {
     remain: summary.remain,
     total: summary.total,
     pct: summary.unlimited ? 100 : pctOf(summary.remain, summary.total),
     unlimited: summary.unlimited,
-    packs: summary.packs.map((p) => ({
+    packs: ordered.map((p) => ({
       name: p.name,
       remain: p.remain,
       limit: p.limit,
-      pct: p.unlimited ? 100 : pctOf(p.remain, p.limit),
       unlimited: p.unlimited,
+      plan: p.plan,
       expiry: formatDateTime(p.expireTime)
     })),
     checkin,
-    updatedAt
+    updatedAt,
+    account: (account ?? '').trim()
   };
 }
 
@@ -119,10 +118,14 @@ export interface Palette {
   accent: string;
   accentMid: string;
   accentLow: string;
+  /** 图标色：与标题文字同色 */
+  icon: string;
   /** 百分比胶囊三档，与进度条同档同色系（更深，白字才压得住） */
   pill: string;
   pillMid: string;
   pillLow: string;
+  /** 套餐标签底：accent 的 12% 透明度，字用 accent */
+  chipBg: string;
 }
 
 /** SVG 内不能引用 VSCode 的 CSS 变量，按主题手选色；进度条与胶囊按余量分三档（>60% 蓝 / 20~60% 橙 / ≤20% 红） */
@@ -132,6 +135,7 @@ export function paletteFor(theme: 'light' | 'dark'): Palette {
       strong: '#1f2328',
       body: '#24292f',
       muted: '#57606a',
+      icon: '#3d444d',
       track: '#d0d7de',
       divider: 'rgba(31,35,40,0.28)',
       rowLine: 'rgba(31,35,40,0.16)',
@@ -140,13 +144,15 @@ export function paletteFor(theme: 'light' | 'dark'): Palette {
       accentLow: '#cf222e',
       pill: '#0550ae',
       pillMid: '#bc4c00',
-      pillLow: '#a5111b'
+      pillLow: '#a5111b',
+      chipBg: 'rgba(9,105,218,0.12)'
     };
   }
   return {
     strong: '#ffffff',
     body: '#e6e6e6',
     muted: '#9a9ea6',
+    icon: '#c0c4cb',
     track: '#3f3f46',
     divider: 'rgba(128,128,128,0.25)',
     rowLine: 'rgba(128,128,128,0.18)',
@@ -155,7 +161,8 @@ export function paletteFor(theme: 'light' | 'dark'): Palette {
     accentLow: '#f48771',
     pill: '#1976d2',
     pillMid: '#e65100',
-    pillLow: '#d9534f'
+    pillLow: '#d9534f',
+    chipBg: 'rgba(33,150,243,0.12)'
   };
 }
 
@@ -170,26 +177,41 @@ function cachedIcon(key: string, build: () => string): string {
   return uri;
 }
 
+/**
+ * 右浮动图标只吃行框顶、不吃基线对齐；这里把 viewBox 往上扩 drop 行（图变高、墨迹下移）。
+ * 真机实测 drop=0，保留这个口子是给换宿主后 1~2px 偏移兜底。
+ */
+export function dropIconUri(uri: string, dropPx: number, size: number): { uri: string; height: number } {
+  const pad = dropPx === 0 ? 0 : (dropPx * 16) / size;
+  if (!pad) return { uri, height: size };
+  const svg = Buffer.from(uri.split(',')[1], 'base64').toString('utf8');
+  const shifted = svg.replace('width="16" height="16" viewBox="0 0 16 16"', `width="16" height="${16 + pad}" viewBox="0 -${pad} 16 ${16 + pad}"`);
+  return { uri: 'data:image/svg+xml;base64,' + Buffer.from(shifted).toString('base64'), height: size + pad };
+}
+/** 真机实测下移量 0（Console [CBQ-V] 标定） */
+const ICON_DROP_PX = 0;
+const ICON_SIZE = 16;
+
 /** 刷新（双向弧 sync） */
 export function refreshIconUri(color: string): string {
-  return cachedIcon('refresh:' + color, () => svgDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><g fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.2 6.8a5.2 5.2 0 0 1 8.9-2.4M12.8 9.2a5.2 5.2 0 0 1-8.9 2.4"/><path d="M12.9 1.6v3.2H9.7"/><path d="M3.1 14.4v-3.2h3.2"/></g></svg>`));
+  return cachedIcon('refresh:' + color, () => svgDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><g fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.37 6.84a5.02 5.02 0 0 1 8.59-2.32M12.63 9.16a5.02 5.02 0 0 1-8.59 2.32"/><path d="M12.73 1.82v3.09H9.64"/><path d="M3.24 14.18v-3.09h3.09"/></g></svg>`));
 }
 
 /** 齿轮（外齿 + 镂空圆环） */
 export function gearIconUri(color: string): string {
   return cachedIcon('gear:' + color, () => svgDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><g fill="${color}">${[0, 45, 90, 135, 180, 225, 270, 315]
-    .map((a) => `<rect x="7" y="0.9" width="2" height="2.7" rx="0.7" transform="rotate(${a} 8 8)"/>`)
+    .map((a) => `<rect x="7" y="1" width="2" height="2.6" rx="0.7" transform="rotate(${a} 8 8)"/>`)
     .join('')}</g><circle cx="8" cy="8" r="3.4" fill="none" stroke="${color}" stroke-width="2.6"/></svg>`));
 }
 
 /** 用量明细（四根等长横线，对齐 traecn） */
 export function usageIconUri(color: string): string {
-  return cachedIcon('usage:' + color, () => svgDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><g fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round"><path d="M2.8 3.2h10.4"/><path d="M2.8 6.4h10.4"/><path d="M2.8 9.6h10.4"/><path d="M2.8 12.8h10.4"/></g></svg>`));
+  return cachedIcon('usage:' + color, () => svgDataUri(`<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><g fill="none" stroke="${color}" stroke-width="1.6" stroke-linecap="round"><path d="M3 3.35h10"/><path d="M3 6.45h10"/><path d="M3 9.55h10"/><path d="M3 12.65h10"/></g></svg>`));
 }
 
-/** 用量明细跳转目标：CodeBuddy 网页端用量页 */
-export function usageTargetHref(): string {
-  return 'https://www.workbuddy.cn/profile/plans-usage';
+/** 用量明细跳转目标：对应区域的网页端用量页 */
+export function usageTargetHref(intl = false): string {
+  return intl ? 'https://www.workbuddy.ai/profile/plans-usage' : 'https://www.workbuddy.cn/profile/plans-usage';
 }
 
 /* ====================== 宿主页脚底距补偿 ====================== */
@@ -203,6 +225,29 @@ export function footerHostPad(appName: string | undefined): number {
 
 /* ====================== 纵向墨迹栅格 ====================== */
 const W = 251.7;
+/** 额度列：`/` 固定在画布中线，与表头「额度」同一参考点 */
+const SLASH_X = W / 2;
+const SLASH_W = 4.29;
+/**
+ * 值与 `/` 的间距左右不对称：remain 是 600 字重（墨迹右缘基本贴锚点），
+ * limit 是 400 字重（墨迹左缘缩进锚点约 1px），两边各取 3 会让墨迹看着左窄右宽。
+ * 左 3.7 / 右 3.4 补偿后，数字串两侧的墨迹间距都≈2.7px。
+ */
+const SLASH_GAP_L = 3.7;
+const SLASH_GAP_R = 3.4;
+/** remain 右锚、limit 左锚 */
+const REMAIN_RIGHT = SLASH_X - SLASH_W / 2 - SLASH_GAP_L;
+const LIMIT_LEFT = SLASH_X + SLASH_W / 2 + SLASH_GAP_R;
+/** 名称↔remain、limit↔到期 的统一间距（两侧等距） */
+const SIDE_GAP_PX = 13;
+/** 剩余额度串是 600 字重，与 400 字重的宽度表有 ±差异，预算时垫 0.4 留余量 */
+const BOLD_PAD_PX = 0.4;
+/** 套餐行名称后的「套餐内」标签（34×14 圆角片，8.5px 字居中）；进名称预算，防止压到额度列 */
+const PLAN_CHIP_TEXT = '套餐内';
+const PLAN_CHIP_FS = 8.5;
+const PLAN_CHIP_W = 34;
+const PLAN_CHIP_H = 14;
+const PLAN_CHIP_GAP = 4;
 /** 相邻元素「墨迹」之间留 GAP 行空白；像素行闭区间，故 STEP = GAP + 1 */
 const GAP = 10;
 const STEP = GAP + 1;
@@ -214,7 +259,7 @@ const NUM_ASC = 22; // 30px 数字：基线上 22 行有墨迹
 const NUM_DESC = 3; // 700 字重下逗号多占 1 行
 const TXT_ASC = 9; // 10~11px 中英混排：基线上 9 行，下 1 行
 const TXT_DESC = 1;
-/** 标题墨迹底到 SVG 顶有 ~10.7px 固定余量，再垫 4 行 → 标题到数字实测间距 15 */
+/** 标题墨迹底到 SVG 顶有 ~10.7px 固定余量，再垫 4 行 → 标题到数字实测 13 */
 const NUM_TOP_PAD = 4;
 
 export interface TooltipLayout {
@@ -243,49 +288,165 @@ export function tooltipLayout(detailRows: number, appName: string | undefined): 
   return { numBase, barTop, headBase, headLineTop, rowBase, rowPitch, footBase, H };
 }
 
+/* ============================ 账号徽标 ============================ */
+/**
+ * 账号徽标渲染在**标题行**（Markdown 层）：Markdown 里改不了文字字号与颜色，
+ * 所以整块（小人图标 + 名字）做成一张 18px 高的透明 SVG 小图，**行内**跟在标题文字后面。
+ * 行内图超宽会顶到图标那一段并被迫换行，所以宽度必须算准、宁窄勿宽。
+ */
+const ACCOUNT_FONT_PX = 10;
+/**
+ * 标题行横向预算：内容宽 W 减掉固定部分，剩下的才是徽标（小人 10.89 + 名字）能占的盒宽。
+ * 徽标超预算会把「用量明细」挤到第二行，所以预算里必须给「徽标↔图标」留出
+ * BADGE_ICON_MIN_GAP_PX 的盒间距兜底，宁可截断名字也不侵占图标。
+ */
+const TITLE_TEXT_PX = 142; // 保守值：真机 DOM 实测 136.03，留 6px 吸收换宿主的字重/字族差异；改标题文案要同步改
+const TITLE_BADGE_SPACE_PX = 3.87; // 标题与徽标之间那个普通空格的实测宽
+const ICONS_WIDTH_PX = 48; // 三枚 16px 右浮动图标（hspace=0）
+/** 徽标盒右缘到图标盒左缘的最低间距 */
+const BADGE_ICON_MIN_GAP_PX = 2;
+const ACCOUNT_BUDGET_PX = W - TITLE_TEXT_PX - TITLE_BADGE_SPACE_PX - ICONS_WIDTH_PX - BADGE_ICON_MIN_GAP_PX; // = 55.83
+
+/** 10px + 600 字重下 ASCII 32..126 的实测推进宽度 */
+const ASCII_W600 = [
+  2.75, 3.04, 4.38, 5.91, 5.55, 8.4, 7.15, 2.58, 3.32, 3.32,
+  4.34, 6.94, 2.41, 4.02, 2.41, 4.14, 5.55, 4.02, 5.55, 5.55,
+  5.76, 5.55, 5.58, 5.36, 5.55, 5.58, 2.41, 2.41, 6.94, 6.94,
+  6.94, 4.44, 9.55, 6.71, 6.04, 6.21, 7.17, 5.18, 5.02, 6.97,
+  7.35, 2.92, 3.96, 6.11, 4.89, 9.24, 7.67, 7.56, 5.84, 7.56,
+  6.23, 5.44, 5.52, 7.03, 6.42, 9.66, 6.19, 5.77, 5.87, 3.32,
+  4.05, 3.32, 6.94, 4.15, 2.89, 5.22, 6.03, 4.7, 6.03, 5.31,
+  3.45, 6.03, 5.82, 2.61, 2.61, 5.25, 2.61, 8.86, 5.83, 5.97,
+  6.03, 6.03, 3.7, 4.31, 3.61, 5.83, 5.07, 7.56, 5.01, 5.08,
+  4.64, 3.32, 2.78, 3.32, 6.94
+];
+
+/** 徽标名字（10px/600）的推进宽度：ASCII 查表、CJK 10、省略号 8.13 */
+function accountCharPx(ch: string): number {
+  const c = ch.codePointAt(0) ?? 0;
+  if (c >= 32 && c <= 126) return ASCII_W600[c - 32];
+  if (ch === '…') return 8.13;
+  if (c >= 0x1f300) return 11;
+  if (c >= 0x2e80) return 10;
+  return 6.3;
+}
+function accountTextPx(s: string): number {
+  let px = 0;
+  for (const ch of s) px += accountCharPx(ch);
+  return px;
+}
+
+/**
+ * 只按宽度截：整名放得下就原样；放不下先扣省略号再逐字累加。
+ */
+export function clipAccountName(name: string): string {
+  const chars = Array.from(name);
+  const room = ACCOUNT_BUDGET_PX - ACCOUNT_ICON_W;
+  const full = chars.join('');
+  if (accountTextPx(full) <= room) return full;
+  const out: string[] = [];
+  let w = accountCharPx('…');
+  for (let i = 0; i < chars.length; i++) {
+    const cw = accountCharPx(chars[i]);
+    if (w + cw > room) break;
+    out.push(chars[i]);
+    w += cw;
+  }
+  return out.join('').replace(/\s+$/, '') + '…';
+}
+
+/** 图高 18：名字基线 14，上下各留 4 行给中文下伸与抗锯齿 */
+const ACCOUNT_H = 18;
+/** 小人墨迹高（图内高度）；名字基线 = 小人墨迹底 */
+const AV_INK_H = 10;
+const AV_TOP = (ACCOUNT_H - AV_INK_H) / 2;
+const ACCOUNT_BASE = AV_TOP + AV_INK_H;
+/** 图内左侧留白：刚好容纳小人描边的半个宽度 */
+const ACCOUNT_PAD_LEFT = 0.8;
+/** 小人与名字之间 ≈ G 与 h 的字间空隙 */
+const ACCOUNT_GAP_PX = 1.0;
+/**
+ * 小人图标：16 单位原始人形（圆头外径 10、描边 2 + 半径 6.5 的半圆肩弧，弧顶压住头圆底边），
+ * 按墨迹高 AV_INK_H 整体缩放（实测 16.5 单位墨迹压到 10px），弧端圆头帽让墨迹在基线下方多出半个描边（0.67px）。
+ */
+const ICON_SCALE = AV_INK_H / 16.5;
+const ICON_W = 15 * ICON_SCALE;
+const ACCOUNT_ICON_W = ACCOUNT_PAD_LEFT + ICON_W + ACCOUNT_GAP_PX;
+
+export function accountBadge(account: string, color: string): { uri: string; width: number; label: string } {
+  const name = clipAccountName(account);
+  const w = ACCOUNT_ICON_W + accountTextPx(name);
+  const B = ACCOUNT_BASE;
+  // 缩放与平移都算进坐标，输出里没有 transform
+  const k = ICON_SCALE;
+  const tx = ACCOUNT_PAD_LEFT - 0.5 * k;
+  const ty = AV_TOP;
+  const cx = 8 * k + tx;
+  const cy = 5 * k + ty;
+  const r = 4 * k;
+  const sw = 2 * k;
+  const sx = 1.5 * k + tx;
+  const sy = 15.5 * k + ty;
+  const ar = 6.5 * k;
+  const adx = 13 * k;
+  const icon = `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${r.toFixed(2)}" fill="none" stroke="${color}" stroke-width="${sw.toFixed(2)}"/>`
+    + `<path d="M${sx.toFixed(2)} ${sy.toFixed(2)}a${ar.toFixed(2)} ${ar.toFixed(2)} 0 0 1 ${adx.toFixed(2)} 0" fill="none" stroke="${color}" stroke-width="${sw.toFixed(2)}" stroke-linecap="round"/>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w.toFixed(1)}" height="${ACCOUNT_H}" viewBox="0 0 ${w.toFixed(1)} ${ACCOUNT_H}" font-family="Segoe UI, Microsoft YaHei, sans-serif">`
+    + icon
+    + `<text x="${(ACCOUNT_PAD_LEFT + ICON_W + ACCOUNT_GAP_PX).toFixed(2)}" y="${B}" fill="${color}" font-size="${ACCOUNT_FONT_PX}" font-weight="600">${escHtml(name)}</text></svg>`;
+  return { uri: svgDataUri(svg), width: w, label: name };
+}
+
 /* ============================ SVG 主体 ============================ */
 export function buildTooltipSvg(data: PanelData, pal: Palette, detailRows: number, appName: string | undefined): string {
   const shown = data.packs.slice(0, detailRows);
   const RIGHT = W;
-  const X_QUOTA = QUOTA_RIGHT;
   // 高度按实际显示行数算，而非 detailRows：积分包少于配置行数时，页脚要紧跟实际末行，否则底部留空
   const L = tooltipLayout(shown.length, appName);
   const parts: string[] = [];
-  // 主数值 + 分母（数字更大更粗，分母小字贴基线）；不限量显示 ∞ / 不限量
-  const big = data.unlimited ? '∞' : escHtml(fmtCredits(data.remain));
-  const sub = data.unlimited ? ' 不限量' : ` / ${escHtml(fmtCredits(data.total))}`;
+  // 主数值 + 分母（数字更大更粗，分母小字贴基线）；不限量显示 不限量 / ∞
+  const big = data.unlimited ? '不限量' : escHtml(fmtCredits(data.remain));
+  const sub = data.unlimited ? ' / ∞' : ` / ${escHtml(fmtCredits(data.total))}`;
   parts.push(`<text x="0" y="${L.numBase}" fill="${pal.strong}" font-size="30" font-weight="700">${big}<tspan fill="${pal.muted}" font-size="13" font-weight="400">${sub}</tspan></text>`);
   // 百分比胶囊（右上，实心底白字，与数字墨迹带垂直居中）；进度条与胶囊按余量分三档
-  // >60% 蓝 / 20~60% 橙 / ≤20% 红；不限量按满格蓝处理
   const accent = data.pct <= 20 ? pal.accentLow : data.pct <= 60 ? pal.accentMid : pal.accent;
   const pillFill = data.pct <= 20 ? pal.pillLow : data.pct <= 60 ? pal.pillMid : pal.pill;
   const pillW = 44;
   const pillH = 22;
   const pillX = RIGHT - pillW;
-  const pillY = NUM_TOP_PAD + (NUM_ASC + NUM_DESC - pillH) / 2;
+  // 从数字基线反推，不写死 NUM_TOP_PAD
+  const pillY = L.numBase - NUM_ASC + (NUM_ASC + NUM_DESC - pillH) / 2;
   parts.push(`<rect x="${pillX}" y="${pillY}" width="${pillW}" height="${pillH}" rx="11" fill="${pillFill}"/>`);
-  parts.push(`<text x="${pillX + pillW / 2}" y="${pillY + pillH / 2 + 1}" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle" dominant-baseline="middle">${data.unlimited ? '∞' : data.pct + '%'}</text>`);
+  parts.push(`<text x="${pillX + pillW / 2}" y="${pillY + pillH / 2 + 1}" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle" dominant-baseline="middle">${data.pct}%</text>`);
   // 进度条（0% 时保底圆角可见；不限量时满）
   const barPct = data.unlimited ? 100 : data.pct;
   parts.push(`<rect x="0" y="${L.barTop}" width="${W}" height="${BAR_ROWS}" rx="2.5" fill="${pal.track}"/>`);
   parts.push(`<rect x="0" y="${L.barTop}" width="${Math.max(BAR_ROWS, (W * barPct) / 100).toFixed(1)}" height="${BAR_ROWS}" rx="2.5" fill="${accent}"/>`);
-  // 表头（下方一条分隔线）
+  // 表头（下方一条分隔线）：额度居中，与明细行的 `/` 共用一条中线
   parts.push(`<text x="0" y="${L.headBase}" fill="${pal.muted}" font-size="10">明细</text>`);
-  parts.push(`<text x="${X_QUOTA}" y="${L.headBase}" fill="${pal.muted}" font-size="10" text-anchor="end">额度</text>`);
+  parts.push(`<text x="${SLASH_X}" y="${L.headBase}" fill="${pal.muted}" font-size="10" text-anchor="middle">额度</text>`);
   parts.push(`<text x="${RIGHT}" y="${L.headBase}" fill="${pal.muted}" font-size="10" text-anchor="end">到期</text>`);
   parts.push(`<line x1="0" y1="${L.headLineTop + LINE_ROWS / 2}" x2="${W}" y2="${L.headLineTop + LINE_ROWS / 2}" stroke="${pal.divider}" stroke-width="1"/>`);
-  // 明细行：名称列格数按本次展示的最宽额度串统一算，逐行各算会让同列截断长短不齐
-  const widestQuota = shown
-    .map((p) => `${p.unlimited ? '∞' : fmtCredits(p.remain)} / ${p.unlimited ? '不限量' : fmtCredits(p.limit)}`)
+  // 名称列预算按本次展示行里最宽的 remain 反推，两侧间距统一 13；逐行各算会让同列截断参差
+  const widestRemain = shown
+    .map((p) => (p.unlimited ? '不限量' : fmtCredits(p.remain)))
     .reduce((a, b) => (textPx(b) > textPx(a) ? b : a), '');
-  const nameWidth = nameCells(widestQuota);
+  const nameRoom = REMAIN_RIGHT - textPx(widestRemain) - BOLD_PAD_PX - SIDE_GAP_PX;
   let y = L.rowBase;
   for (const p of shown) {
-    const remainText = p.unlimited ? '∞' : escHtml(fmtCredits(p.remain));
-    const limitText = p.unlimited ? '不限量' : escHtml(fmtCredits(p.limit));
-    parts.push(`<text x="0" y="${y}" fill="${pal.body}" font-size="11">${escHtml(truncate(p.name, nameWidth))}</text>`);
-    parts.push(`<text x="${X_QUOTA}" y="${y}" font-size="11" text-anchor="end"><tspan fill="${pal.strong}" font-weight="600">${remainText}</tspan><tspan fill="${pal.muted}" font-weight="400"> / ${limitText}</tspan></text>`);
-    parts.push(`<text x="${RIGHT}" y="${y}" fill="${pal.muted}" font-size="9.5" text-anchor="end">${escHtml(p.expiry)}</text>`);
+    const remainText = p.unlimited ? '不限量' : escHtml(fmtCredits(p.remain));
+    const limitText = p.unlimited ? '∞' : escHtml(fmtCredits(p.limit));
+    const displayName = truncatePx(p.name, p.plan ? nameRoom - PLAN_CHIP_W - PLAN_CHIP_GAP : nameRoom);
+    parts.push(`<text x="0" y="${y}" fill="${pal.body}" font-size="11">${escHtml(displayName)}</text>`);
+    if (p.plan) {
+      const chipX = textPx(displayName) + PLAN_CHIP_GAP;
+      parts.push(`<rect x="${chipX.toFixed(1)}" y="${y - 11}" width="${PLAN_CHIP_W}" height="${PLAN_CHIP_H}" rx="7" fill="${pal.chipBg}"/>`);
+      parts.push(`<text x="${(chipX + PLAN_CHIP_W / 2).toFixed(1)}" y="${y - 1}" fill="${pal.accent}" font-size="${PLAN_CHIP_FS}" text-anchor="middle">${PLAN_CHIP_TEXT}</text>`);
+    }
+    parts.push(`<text x="${REMAIN_RIGHT.toFixed(1)}" y="${y}" fill="${pal.strong}" font-size="11" font-weight="600" text-anchor="end">${remainText}</text>`);
+    parts.push(`<text x="${SLASH_X}" y="${y}" fill="${pal.muted}" font-size="11" text-anchor="middle">/</text>`);
+    parts.push(`<text x="${LIMIT_LEFT.toFixed(1)}" y="${y}" fill="${pal.muted}" font-size="11">${limitText}</text>`);
+    parts.push(`<text x="${RIGHT}" y="${y}" fill="${pal.body}" font-size="9.5" text-anchor="end">${escHtml(p.expiry)}</text>`);
     const lineTop = y + TXT_DESC + STEP;
     parts.push(`<line x1="0" y1="${lineTop + LINE_ROWS / 2}" x2="${W}" y2="${lineTop + LINE_ROWS / 2}" stroke="${pal.rowLine}" stroke-width="1"/>`);
     y += L.rowPitch;
@@ -298,9 +459,8 @@ export function buildTooltipSvg(data: PanelData, pal: Palette, detailRows: numbe
   const dotColor = data.checkin === 'claimed' ? '#4caf50' : data.checkin === 'unclaimed' ? '#d7a33a' : pal.muted;
   parts.push(`<circle cx="3.5" cy="${L.footBase - (TXT_ASC - TXT_DESC) / 2}" r="3.5" fill="${dotColor}"/>`);
   parts.push(`<text x="12" y="${L.footBase}" fill="${pal.body}" font-size="11">${escHtml(checkinText)}</text>`);
-  parts.push(`<text x="${RIGHT}" y="${L.footBase}" fill="${pal.muted}" font-size="10" text-anchor="end">更新 ${escHtml(data.updatedAt)}</text>`);
-  // SVG 在 tooltip 里落在 ~38.7px 处，整体下移 0.3 让元素压在整数像素行上，
-  // 否则抗锯齿会把 1px 分隔线糊成两行（实测间距在 10/11 之间跳）。
+  parts.push(`<text x="${RIGHT}" y="${L.footBase}" fill="${pal.body}" font-size="10" text-anchor="end">更新 ${escHtml(data.updatedAt)}</text>`);
+  // 整体下移 0.3 让元素压在整数像素行上，否则抗锯齿会把 1px 分隔线糊成两行（实测间距在 10/11 之间跳）
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${L.H}" viewBox="0 0 ${W} ${L.H}" font-family="Segoe UI, Microsoft YaHei, sans-serif"><g transform="translate(0,0.3)">${parts.join('')}</g></svg>`;
 }
 
@@ -316,17 +476,27 @@ export function clampDetailRows(n: number): number {
 }
 
 /**
- * hover 浮窗 Markdown：标题行（左标题 + 右浮动可点图标）+ 单张透明背景 SVG 数据体。
+ * hover 浮窗 Markdown：标题行（左标题 + 行内账号徽标 + 右浮动可点图标）+ 单张透明背景 SVG 数据体。
  * 图标必须放 Markdown 层才可点（图片内部元素不可点）；float:right 按 DOM 顺序从右往左排，
- * 故 DOM 顺序 齿轮→刷新 视觉上是 刷新·齿轮，齿轮贴内容右缘。
+ * 故 DOM 顺序 齿轮→刷新→用量 的视觉顺序是 用量·刷新·齿轮。
  */
-export function buildTooltipMarkdown(data: PanelData, opts: { theme?: 'light' | 'dark'; iconColor?: string; detailRows?: number; appName?: string } = {}): string {
+export function buildTooltipMarkdown(data: PanelData, opts: { theme?: 'light' | 'dark'; iconColor?: string; detailRows?: number; appName?: string; intl?: boolean } = {}): string {
   const pal = paletteFor(opts.theme ?? 'dark');
-  const iconColor = opts.iconColor ?? pal.muted;
+  const iconColor = opts.iconColor ?? pal.icon;
   const rows = clampDetailRows(opts.detailRows ?? DEFAULT_DETAIL_ROWS);
-  const gear = `<a href="command:workbench.action.openSettings?%5B%22codebuddyquota%22%5D" title="设置"><img src="${gearIconUri(iconColor)}" align="right" width="14" hspace="6" alt="设置"></a>`;
-  const refresh = `<a href="command:codebuddyquota.refresh" title="刷新"><img src="${refreshIconUri(iconColor)}" align="right" width="14" hspace="18" alt="刷新"></a>`;
-  const usage = `<a href="${usageTargetHref()}" title="用量明细"><img src="${usageIconUri(iconColor)}" align="right" width="14" hspace="6" alt="用量明细"></a>`;
+  const g = dropIconUri(gearIconUri(iconColor), ICON_DROP_PX, ICON_SIZE);
+  const r = dropIconUri(refreshIconUri(iconColor), ICON_DROP_PX, ICON_SIZE);
+  const u = dropIconUri(usageIconUri(iconColor), ICON_DROP_PX, ICON_SIZE);
+  const gear = `<a href="command:workbench.action.openSettings?%5B%22codebuddyquota%22%5D" title="设置"><img src="${g.uri}" align="right" width="${ICON_SIZE}" height="${g.height}" hspace="0" alt="设置"></a>`;
+  const refresh = `<a href="command:codebuddyquota.refresh" title="刷新"><img src="${r.uri}" align="right" width="${ICON_SIZE}" height="${r.height}" hspace="0" alt="刷新"></a>`;
+  const usage = `<a href="${usageTargetHref(opts.intl)}" title="用量明细"><img src="${u.uri}" align="right" width="${ICON_SIZE}" height="${u.height}" hspace="0" alt="用量明细"></a>`;
+  // 账号徽标是行内图（不浮动）：紧跟标题文字，三枚图标仍然右浮动停在最右边
+  let badge = '';
+  if (data.account) {
+    const b = accountBadge(data.account, pal.muted);
+    // 末尾不要留空格：空格也算行内宽度，会把图标挤到第二行
+    badge = `<img src="${b.uri}" align="top" width="${b.width.toFixed(1)}" height="${ACCOUNT_H}" alt="当前账号 ${escHtml(b.label)}">`;
+  }
   const body = svgDataUri(buildTooltipSvg(data, pal, rows, opts.appName));
-  return `### CodeBuddy 积分面板 ${gear}${refresh}${usage}\n\n![积分数据](${body})`;
+  return `### CodeBuddy 积分面板 ${badge}${gear}${refresh}${usage}\n\n![积分数据](${body})`;
 }

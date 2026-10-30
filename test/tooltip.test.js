@@ -12,31 +12,25 @@ const SUMMARY = {
   ]
 };
 
-test('displayWidth 全角按 2 格、半角按 1 格', () => {
-  assert.strictEqual(t.displayWidth('中文'), 4);
-  assert.strictEqual(t.displayWidth('ab'), 2);
-  assert.strictEqual(t.displayWidth('中a'), 3);
-});
-
-test('truncate 放得下原样返回，放不下截断补省略号', () => {
-  assert.strictEqual(t.truncate('基础积分包', 10), '基础积分包');
-  assert.strictEqual(t.truncate('限时活动赠送积分包超长名称', 8), '限时活…');
-  assert.strictEqual(t.truncate('中文名', 1), '…');
-});
-
 test('textPx 按 11px 实测字形累加', () => {
   assert.strictEqual(t.textPx('中中'), 22);
-  assert.strictEqual(t.textPx('w'), 7.9);
-  assert.strictEqual(t.textPx('0'), 6.1);
+  assert.strictEqual(t.textPx('w'), 7.95);
+  assert.strictEqual(t.textPx('0'), 5.93);
+  assert.strictEqual(t.textPx('W'), 10.27);
+  assert.strictEqual(t.textPx('…'), 8.06);
   assert.strictEqual(t.textPx(''), 0);
 });
 
-test('nameCells 额度串越宽名称列越短，且钳在 6~11 格', () => {
-  const narrow = t.nameCells('760 / 2,000');
-  const wide = t.nameCells('98,765,432 / 98,765,432');
-  assert.ok(wide <= narrow, `${wide} 应不超过 ${narrow}`);
-  assert.ok(t.nameCells('∞ / 不限量') >= 6);
-  assert.ok(t.nameCells('0 / 0') <= 11);
+test('truncatePx 放得下原样、放不下先扣省略号再逐字截断', () => {
+  assert.strictEqual(t.truncatePx('基础积分包', 60), '基础积分包');
+  const cut = t.truncatePx('限时活动赠送积分包超长名称', 60);
+  assert.ok(cut.endsWith('…'), cut);
+  assert.ok(t.textPx(cut) <= 60, `${cut} ${t.textPx(cut)}px`);
+  assert.strictEqual(t.truncatePx('一二三四五', 50), '一二三…');
+});
+
+test('truncatePx 补省略号前去掉尾部空格', () => {
+  assert.strictEqual(t.truncatePx('Alpha Beta', 39.87), 'Alpha…');
 });
 
 test('tooltipLayout 高度随实际行数增长', () => {
@@ -111,7 +105,48 @@ test('三档的边界：60 为橙、61 为蓝、20 为红、21 为橙', () => {
   assert.strictEqual(barColor(210, 1000), pal.accentMid, '21% 应算橙');
 });
 
-test('buildPanelData 到期列到分钟、占比封顶', () => {
+test('账号徽标只在标题行渲染，不进 SVG 数据体', () => {
+  const pal = t.paletteFor('dark');
+  const withName = t.buildPanelData(SUMMARY, 'claimed', '14:39', 'Ghost');
+  const without = t.buildPanelData(SUMMARY, 'claimed', '14:39');
+  const a = t.buildTooltipSvg(withName, pal, 3, undefined);
+  const b = t.buildTooltipSvg(without, pal, 3, undefined);
+  assert.strictEqual(a, b, '数据体与账号无关，行高不变');
+
+  const md = t.buildTooltipMarkdown(withName, { theme: 'dark', detailRows: 3, appName: 'Visual Studio Code' });
+  assert.ok(/alt="当前账号 Ghost"/.test(md), '标题行带账号徽标');
+  assert.strictEqual((md.match(/align="right"/g) || []).length, 3, '只有三枚图标右浮动，徽标是行内');
+  assert.ok(md.indexOf('alt="当前账号') < md.indexOf('alt="设置"'), '账号徽标在标题文字之后、图标之前（行内）');
+
+  const mdNone = t.buildTooltipMarkdown(without, { theme: 'dark', detailRows: 3 });
+  assert.ok(!/alt="当前账号/.test(mdNone), '没昵称就不渲染徽标');
+});
+
+test('账号徽标：放得下原样，放不下按宽度补省略号', () => {
+  assert.strictEqual(t.clipAccountName('Ghost'), 'Ghost');
+  assert.strictEqual(t.clipAccountName('ghosty'), 'ghosty', '放得下就不加省略号');
+  const b = t.accountBadge('Ghost', '#9a9ea6');
+  assert.ok(b.width <= 60, `徽标宽 ${b.width}，超了会把右上角图标挤到第二行`);
+  assert.ok(b.uri.startsWith('data:image/svg+xml;base64,'), '徽标是内联 SVG 图');
+});
+
+test('账号名超宽补省略号，代理对不拆', () => {
+  assert.strictEqual(t.clipAccountName('GhostCmdr'), 'GhostC…');
+  assert.strictEqual(t.clipAccountName('😀😀😀😀😀😀').endsWith('…'), true);
+  assert.ok(!t.clipAccountName('😀😀😀😀😀😀').includes('�'), '不留半个代理对');
+});
+
+test('中文昵称按宽度截，不溢出预算', () => {
+  assert.strictEqual(t.clipAccountName('积分面板测试号'), '积分面…');
+  assert.strictEqual(t.clipAccountName('测试测试测试测试'), '测试测…');
+});
+
+test('账号名截断后不留尾部空格，省略号紧跟名字', () => {
+  assert.strictEqual(t.clipAccountName('AA BB CC DD EE FF'), 'AA BB…');
+  assert.strictEqual(t.clipAccountName('积分 包 名称 很长 很长'), '积分 包…');
+});
+
+test('buildPanelData 到期列到分钟、占比四舍五入', () => {
   const d = t.buildPanelData(SUMMARY, 'claimed', '14:39');
   assert.strictEqual(d.packs[0].expiry, '2026-12-31 18:38');
   assert.strictEqual(d.packs[1].expiry, '2027-01-15 08:00');
@@ -119,11 +154,90 @@ test('buildPanelData 到期列到分钟、占比封顶', () => {
   assert.strictEqual(d.pct, Math.round((5802 / 7100) * 100));
 });
 
-test('buildPanelData 整体不限量时 pct 记 100、明细行显示 ∞', () => {
-  const d = t.buildPanelData({ remain: 0, total: 0, unlimited: true, packs: [] }, 'unknown', '14:39');
+test('整体不限量：主额度与明细行显示「不限量 / ∞」，胶囊 100%', () => {
+  const d = t.buildPanelData({ remain: 0, total: 0, unlimited: true, packs: [{ name: '不限量包', remain: 0, limit: 0, unlimited: true }] }, 'unknown', '14:39');
   assert.strictEqual(d.pct, 100);
   const svg = t.buildTooltipSvg(d, t.paletteFor('dark'), 3, undefined);
-  assert.ok(svg.includes('∞'));
+  assert.ok(svg.includes('>不限量<tspan'), '主数字是文本「不限量」');
+  assert.ok(svg.includes(' / ∞'), '分母位是 ∞');
+  assert.ok(svg.includes('100%'), '胶囊显示 100%');
+  assert.ok(svg.includes('>不限量</text>'), '明细行 remain 显示「不限量」');
+  assert.ok(svg.includes('>∞</text>'), '明细行 limit 显示 ∞');
+  assert.ok(!svg.includes('∞ / ∞'));
+});
+
+test('明细行排序：不限量始终置顶；开置顶时订阅套餐更靠前', () => {
+  const summary = {
+    remain: 3,
+    total: 3,
+    unlimited: false,
+    packs: [
+      { name: '赠送A', remain: 1, limit: 1, unlimited: false, plan: false, expireTime: '2026-11-01' },
+      { name: '赠送B', remain: 1, limit: 1, unlimited: false, plan: false, expireTime: '2026-10-20' },
+      { name: '套餐', remain: 1, limit: 1, unlimited: false, plan: true, expireTime: '2026-12-01' },
+      { name: '不限量', remain: 0, limit: 0, unlimited: true, plan: false }
+    ]
+  };
+  const off = t.buildPanelData(summary, 'claimed', '14:39', '', false);
+  assert.deepStrictEqual(off.packs.map((p) => p.name), ['不限量', '赠送B', '赠送A', '套餐']);
+  const on = t.buildPanelData(summary, 'claimed', '14:39', '', true);
+  assert.deepStrictEqual(on.packs.map((p) => p.name), ['套餐', '不限量', '赠送B', '赠送A']);
+});
+
+test('关闭置顶且没有不限量包时，保持到期升序', () => {
+  const summary = {
+    remain: 2,
+    total: 2,
+    unlimited: false,
+    packs: [
+      { name: 'B', remain: 1, limit: 1, unlimited: false, plan: false, expireTime: '2026-12-01' },
+      { name: 'A', remain: 1, limit: 1, unlimited: false, plan: false, expireTime: '2026-10-01' }
+    ]
+  };
+  const d = t.buildPanelData(summary, 'claimed', '14:39', '', false);
+  assert.deepStrictEqual(d.packs.map((p) => p.name), ['A', 'B']);
+});
+
+test('空包默认不显示；开启套餐包置顶时套餐包豁免、分母不变', () => {
+  const summary = {
+    remain: 100,
+    total: 1700,
+    unlimited: false,
+    packs: [
+      { name: '套餐', remain: 0, limit: 500, unlimited: false, plan: true, expireTime: '2026-10-31' },
+      { name: '赠送', remain: 0, limit: 1000, unlimited: false, plan: false, expireTime: '2026-11-30' },
+      { name: '加油', remain: 100, limit: 200, unlimited: false, plan: false, expireTime: '2026-12-31' }
+    ]
+  };
+  const off = t.buildPanelData(summary, 'claimed', '14:39', '', false);
+  assert.deepStrictEqual(off.packs.map((p) => p.name), ['加油']);
+  assert.strictEqual(off.pct, 6);
+  const on = t.buildPanelData(summary, 'claimed', '14:39', '', true);
+  assert.deepStrictEqual(on.packs.map((p) => p.name), ['套餐', '加油']);
+  assert.strictEqual(on.pct, off.pct, '豁免只影响显示，分母与占比不变');
+  assert.strictEqual(on.total, 1700);
+});
+
+test('套餐行名称后带「套餐内」标签，名称预算为标签让位', () => {
+  const summary = {
+    remain: 100,
+    total: 600,
+    unlimited: false,
+    packs: [
+      { name: 'CodeBuddy个人体验版', remain: 0, limit: 500, unlimited: false, plan: true, expireTime: '2026-10-31T23:59:59' },
+      { name: 'CodeBuddy个人版国内运营裂变包', remain: 100, limit: 100, unlimited: false, plan: false, expireTime: '2026-11-30' }
+    ]
+  };
+  const d = t.buildPanelData(summary, 'claimed', '14:39', '', true);
+  const svg = t.buildTooltipSvg(d, t.paletteFor('dark'), 3, undefined);
+  assert.ok(svg.includes('>套餐内</text>'), '标签文字');
+  assert.ok(svg.includes('width="34" height="14" rx="7"'), '标签 34×14');
+  assert.ok(svg.includes('rgba(33,150,243,0.12)'), '标签淡蓝底');
+  const lightSvg = t.buildTooltipSvg(d, t.paletteFor('light'), 3, undefined);
+  assert.ok(lightSvg.includes('rgba(9,105,218,0.12)'), '浅色主题标签底');
+  const planName = svg.match(/<text x="0" y="\d+" fill="#e6e6e6" font-size="11">([^<]*)<\/text>/)[1];
+  assert.ok(planName.endsWith('…'), `套餐行名称应截断：${planName}`);
+  assert.ok(t.textPx(planName) + 34 + 4 <= 120 - t.textPx('100') - 0.4 - 13, '名称 + 标签不超过名称预算');
 });
 
 test('buildTooltipSvg 含表头、页脚签到与更新时间', () => {
@@ -143,5 +257,8 @@ test('buildTooltipMarkdown 标题行 + 内联 SVG 数据体', () => {
   assert.ok(md.startsWith('### CodeBuddy 积分面板'));
   assert.ok(md.includes('command:codebuddyquota.refresh'));
   assert.ok(md.includes('workbuddy.cn/profile/plans-usage'));
+  const intlMd = t.buildTooltipMarkdown(d, { theme: 'dark', detailRows: 3, intl: true });
+  assert.ok(intlMd.includes('workbuddy.ai/profile/plans-usage'), '国际版账号跳国际站用量页');
+  assert.ok(!intlMd.includes('workbuddy.cn/profile/plans-usage'));
   assert.ok(md.includes('![积分数据]('));
 });

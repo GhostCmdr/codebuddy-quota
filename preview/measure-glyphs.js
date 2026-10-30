@@ -9,7 +9,7 @@ const { chromePath, chromeArgs } = require('./chrome.js');
  * 注意：这是 getBBox 的墨迹宽，**含悬垂**，不等于推进宽度（advance）。对 `/`、`…` 这类
  * 有悬垂的字形，墨迹会明显大于推进宽（本机实测斜杠墨迹 4.37 而表里推进宽取 3.4），
  * 所以输出的数只能用来发现「大幅偏离」，**不要拿它直接改 glyphPx**。
- * glyphPx 的权威来源是 11px 像素扫描实测（见 tooltip.ts 注释与 tooltip-design-system.md）。
+ * glyphPx 的权威来源是 11px 像素扫描实测（见 tooltip.ts 注释与 AGENTS.md 的「横向」一节）。
  */
 
 const FAMILY = 'Segoe UI, Microsoft YaHei, sans-serif';

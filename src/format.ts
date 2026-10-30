@@ -1,6 +1,7 @@
 export function pctOf(remain: number, total: number): number {
   if (!Number.isFinite(total) || total <= 0) return 0;
-  return Math.min(100, Math.max(0, Math.round((remain / total) * 100)));
+  if (remain >= total) return 100;
+  return Math.max(0, Math.min(99, Math.round((remain / total) * 100)));
 }
 function fmtInt(n: number): string { return Math.round(n).toLocaleString('en-US'); }
 function fmtDecimal(scaled: number, digits: number): string {
@@ -11,13 +12,26 @@ function fmtDecimal(scaled: number, digits: number): string {
   const grouped = Number(intPart).toLocaleString('en-US');
   return fracPart ? `${grouped}.${fracPart}` : grouped;
 }
+/** 4 位有效数字：1.764w / 17.64w / 176.4w / 1,764w */
+function sigDigits(scaled: number): number {
+  return scaled >= 1000 ? 0 : scaled >= 100 ? 1 : scaled >= 10 ? 2 : 3;
+}
 export function fmtCredits(value: number): string {
   const n = Math.round(value);
   if (!Number.isFinite(n)) return '-';
   if (n < 10000) return fmtInt(n);
-  const scale = n < 1e8 ? { div: 1e4, unit: 'w' } : { div: 1e8, unit: '亿' };
-  const scaled = n / scale.div;
-  return fmtDecimal(scaled, scaled >= 1000 ? 0 : 1) + scale.unit;
+  let unit = n < 1e8 ? 'w' : '亿';
+  let div = unit === 'w' ? 1e4 : 1e8;
+  let scaled = n / div;
+  let digits = sigDigits(scaled);
+  // w 档四舍五入会进位出 10,000w（41px 宽串），这时升级成 亿
+  if (unit === 'w' && Number(scaled.toFixed(digits)) >= 10000) {
+    unit = '亿';
+    div = 1e8;
+    scaled = n / div;
+    digits = sigDigits(scaled);
+  }
+  return fmtDecimal(scaled, digits) + unit;
 }
 /** 悬浮弹窗到期列：到分钟；无到期显示 '-'（对齐 traecn 面板） */
 export function formatDateTime(s?: string): string {

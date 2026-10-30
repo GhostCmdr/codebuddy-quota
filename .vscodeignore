@@ -37,3 +37,10 @@ build/
 # Qoder 余量看板等本地工具的产物（credits 报告与 canvas 草稿），同样不该进包
 .qoder-credits
 .qoder-credits/**
+
+# zion-mcp 的 daemon 注册表与日志：registry.json 里有 token、监听端口和含本机路径的 logPath
+.zion-mcp
+.zion-mcp/**
+
+# 市场截图走 GitHub raw 链接，不重复打进安装包
+resources/screenshot.png

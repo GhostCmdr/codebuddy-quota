@@ -63,6 +63,7 @@ function loadHarness(options = {}) {
   const statusItems = [];
   const notifications = { info: [], error: [], warning: [] };
   const fetchCalls = [];
+  const configWrites = [];
   let configHandler = null;
   let themeHandler = null;
   let responder = options.responder || defaultResponder();
@@ -113,7 +114,13 @@ function loadHarness(options = {}) {
             workspaceValue: scopeValues.workspace[key],
             workspaceFolderValue: scopeValues.workspaceFolder[key]
           }),
-          update: async () => {}
+          update: async (key, value, target) => {
+            const scope = target === vscode.ConfigurationTarget.Workspace ? 'workspace'
+              : target === vscode.ConfigurationTarget.WorkspaceFolder ? 'workspaceFolder' : 'global';
+            configWrites.push({ key, value });
+            if (value === undefined) delete scopeValues[scope][key];
+            else scopeValues[scope][key] = value;
+          }
         };
       },
       onDidChangeConfiguration(handler) { configHandler = handler; return { dispose() {} }; }
@@ -154,7 +161,7 @@ function loadHarness(options = {}) {
   };
 
   return {
-    ext, context, statusItems, notifications, fetchCalls, commands, state, secrets,
+    ext, context, statusItems, notifications, fetchCalls, configWrites, commands, state, secrets,
     setResponder(next) { responder = next; },
     fireThemeChange() { if (themeHandler) themeHandler(); },
     fireConfigChange(changedKeys) {
@@ -206,6 +213,50 @@ test('启动刷新展示余量，tooltip 是可信的 MarkdownString', async () 
     assert.match(h.statusItems[0].tooltip.value, /积分数据/);
     assert.strictEqual(h.statusItems[0].tooltip.isTrusted, true);
     assert.strictEqual(h.statusItems[0].tooltip.supportHtml, true);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('不限量账号的状态栏显示「不限量 (100%)」', async () => {
+  const base = defaultResponder();
+  const h = loadHarness({
+    secrets: { manualToken: freshToken() },
+    responder: async (url, init) => (url.includes('get-user-resource')
+      ? json({ data: { Response: { Data: { Accounts: [
+        { PackageName: '不限量包', CycleCapacityRemainPrecise: '-1', CycleCapacitySizePrecise: '-1' }
+      ] } } } })
+      : base(url, init))
+  });
+  try {
+    h.ext.activate(h.context);
+    await settle(() => h.statusItems[0].text.includes('不限量'));
+    assert.strictEqual(h.statusItems[0].text, '$(codebuddy-sparkle) 不限量 (100%)');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('旧设置键 buddyTravel 迁移到 autoTravel 并清除旧键', async () => {
+  const h = loadHarness({ config: { buddyTravel: false }, secrets: { manualToken: freshToken() } });
+  try {
+    h.ext.activate(h.context);
+    await settle(() => h.statusItems[0].text.includes('760'));
+    assert.ok(h.configWrites.some((w) => w.key === 'autoTravel' && w.value === false), '旧键的值应迁移成 autoTravel');
+    assert.ok(h.configWrites.some((w) => w.key === 'buddyTravel' && w.value === undefined), '旧键应从 settings.json 清除');
+    assert.ok(!h.fetchCalls.some((u) => u.includes('buddy/travel')), '迁移后旅行仍然是关的');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('旧键为 true 时迁移后旅行照常执行', async () => {
+  const h = loadHarness({ config: { buddyTravel: true }, secrets: { manualToken: freshToken() } });
+  try {
+    h.ext.activate(h.context);
+    await settle(() => h.statusItems[0].text.includes('760'));
+    assert.ok(h.configWrites.some((w) => w.key === 'autoTravel' && w.value === true));
+    assert.ok(h.fetchCalls.some((u) => u.includes('buddy/travel/status')), '开着就该打旅行 status');
   } finally {
     h.cleanup();
   }
@@ -365,7 +416,7 @@ test('手动签到：未领取时真的领一次并提示成功', async () => {
   }
 });
 
-test('签到提示不带领取数值，带账号昵称（超 5 字符用 ... 收尾）', async () => {
+test('签到提示不带领取数值，带完整账号昵称', async () => {
   const h = loadHarness({ config: { autoCheckin: false }, secrets: { manualToken: freshToken(3600, 'abcdefg') } });
   try {
     h.ext.activate(h.context);
@@ -373,7 +424,7 @@ test('签到提示不带领取数值，带账号昵称（超 5 字符用 ... 收
     await h.commands.get('codebuddyquota.checkin')();
     const msg = h.notifications.info.find((m) => m.includes('签到成功'));
     assert.ok(msg, '应有签到成功提示');
-    assert.match(msg, /（abcde\.\.\.）/, msg);
+    assert.match(msg, /（abcdefg）/, msg);
     assert.ok(!/\+\s*\d/.test(msg), `提示里不该出现领取数值：${msg}`);
   } finally {
     h.cleanup();

@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 const { chromePath, chromeArgs } = require('./chrome.js');
-const { buildPanelData, buildTooltipSvg, paletteFor, svgDataUri, refreshIconUri, gearIconUri, usageIconUri } = require('../out/tooltip.js');
+const { buildPanelData, buildTooltipSvg, paletteFor, svgDataUri, refreshIconUri, gearIconUri, usageIconUri, accountBadge } = require('../out/tooltip.js');
 
 /**
  * 出图三张（都是**合成示例数据**，不碰用户自己截的真机图）：
@@ -24,10 +24,14 @@ const summary = {
   ]
 };
 
+/** 示例账号名：样例数据里带上，预览图才和真机（有昵称）一致 */
+const ACCOUNT = 'Ghost';
+
 function card(kind) {
   const pal = paletteFor(kind);
-  const data = buildPanelData(summary, 'unclaimed', '14:39');
+  const data = buildPanelData(summary, 'unclaimed', '14:39', ACCOUNT);
   const body = buildTooltipSvg(data, pal, 3, undefined);
+  const badge = accountBadge(data.account, pal.muted);
   const titleColor = kind === 'dark' ? '#cccccc' : '#1f2328';
   const pageBg = kind === 'dark' ? '#252526' : '#ffffff';
   const border = kind === 'dark' ? '#454545' : '#d4d4d4';
@@ -38,10 +42,10 @@ body{font-family:"Segoe UI","Microsoft YaHei",sans-serif}
 .monaco-hover{box-sizing:border-box;line-height:1.5em}
 .monaco-hover .hover-contents{padding:4px 8px}
 .monaco-hover p,.monaco-hover h3{margin:8px 0}
-.monaco-hover h3{line-height:1.1;font-size:15.21px;font-weight:700}
+.monaco-hover h3{line-height:1.1;font-size:14.04px;font-weight:700;font-family:"Segoe WPC","Segoe UI","Microsoft YaHei",sans-serif}
 .monaco-hover p:last-child{margin-bottom:0}
 </style></head><body><div class="workbench-hover monaco-hover"><div class="markdown-hover"><div class="hover-contents">
-<h3>CodeBuddy 积分面板 <img src="${refreshIconUri(pal.muted)}" width="14" align="right"><img src="${gearIconUri(pal.muted)}" width="14" align="right" hspace="6"><img src="${usageIconUri(pal.muted)}" width="14" align="right" hspace="6"></h3>
+<h3>CodeBuddy 积分面板 <img src="${gearIconUri(pal.muted)}" width="14" align="right" hspace="2"><img src="${refreshIconUri(pal.muted)}" width="14" align="right" hspace="2"><img src="${usageIconUri(pal.muted)}" width="14" align="right" hspace="2"><img src="${badge.uri}" align="right" width="${badge.width.toFixed(1)}" height="14" alt="当前账号"></h3>
 <p><img src="${svgDataUri(body)}" alt="积分数据"></p>
 </div></div></div></body></html>`;
 }
@@ -60,7 +64,7 @@ for (const kind of ['dark', 'light']) {
 // 面板本体（不带外壳）：改版式后拿它跟 resources/screenshot.png 那张真机图比对
 {
   const PAD = 14;
-  const body = buildTooltipSvg(buildPanelData(summary, 'unclaimed', '14:39'), paletteFor('dark'), 3, undefined);
+  const body = buildTooltipSvg(buildPanelData(summary, 'unclaimed', '14:39', ACCOUNT), paletteFor('dark'), 3, undefined);
   const width = Number(body.match(/width="([\d.]+)"/)[1]);
   const height = Number(body.match(/height="([\d.]+)"/)[1]);
   const html = path.join(__dirname, '_shot.html');

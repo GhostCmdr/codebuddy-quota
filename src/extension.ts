@@ -3,7 +3,7 @@ import {
   fetchUsage, fetchCheckinStatus, doCheckin,
   fetchBuddyStatus, claimBuddy, departBuddy, fetchTravelRewardCredit, CreditsSummary, ApiError
 } from './api';
-import { configure as configureAuth, getAuth, invalidateAuth, TokenStore } from './auth';
+import { configure as configureAuth, getAuth, invalidateAuth, isInternationalAuth, setRegionPolicy, TokenStore } from './auth';
 import { currentHostStorage } from './providers/vscodeHost';
 import { buildPanelData, buildTooltipMarkdown, footerHostPad, clampDetailRows } from './tooltip';
 import { ensureCheckin, ensureBuddy, resetBuddyState, DayGuard } from './claim';
@@ -20,9 +20,9 @@ const LAST_CHECKIN_DATE_KEY = 'codebuddyquota.lastCheckinSuccessDate';
 const LAST_BUDDY_DEPART_DATE_KEY = 'codebuddyquota.lastBuddyDepartDate';
 
 /** 改了必须重新取数的设置项；不在此列的只要按上一次数据重绘或不影响渲染 */
-const REFRESH_KEYS = ['manualToken', 'refreshInterval'];
+const REFRESH_KEYS = ['manualToken', 'refreshInterval', 'region'];
 /** 既不参与渲染也不参与取数的设置项：拨动它只改变后续领取决策，本身不该触发任何请求 */
-const NO_EFFECT_KEYS = ['autoCheckin', 'buddyTravel'];
+const NO_EFFECT_KEYS = ['autoCheckin', 'autoTravel', 'buddyTravel'];
 
 let statusBar: vscode.StatusBarItem;
 let output: vscode.OutputChannel;
@@ -38,6 +38,12 @@ let pendingRefresh = false;
 let claiming = false;
 
 let lastSummary: CreditsSummary | undefined;
+/** 上一轮账号的区域：决定「用量明细」跳到哪个站点的用量页 */
+let lastIntl = false;
+/** 面板首行显示的账号昵称：刷新时从当时用的 token 里取，换账号后随下次刷新更新 */
+let lastAccountName = '';
+/** 上一轮凭证来源：手动兜底 → 自动 的恢复要在日志里说一句 */
+let lastAuthMode = '';
 let lastCheckinState = 'unknown';
 let lastCheckinDay = '';
 let lastFetchedAt = 0;
@@ -56,14 +62,9 @@ function messageOf(err: unknown): string {
   return raw.trim() ? raw : '未知错误';
 }
 
-/**
- * 提示语里区分账号用：优先 token 里的 nickname，超过 5 个字符用 ... 收尾。
- * 不额外请求接口——昵称本来就在 JWT 里；没有就不带括号。
- */
+/** 提示语里区分账号用：取 token 里的 nickname，不截断、不额外请求接口；没有就不带括号 */
 function accountLabel(token: string): string {
-  const name = jwtStringClaim(token, 'nickname');
-  if (!name) return '';
-  return name.length > 5 ? `${name.slice(0, 5)}...` : name;
+  return jwtStringClaim(token, 'nickname') ?? '';
 }
 
 /**
@@ -128,15 +129,15 @@ async function storedManualToken(): Promise<string> {
   }
 }
 
-async function sweepManualToken(): Promise<boolean> {
-  if (!secretStore) return false;
+async function sweepManualToken(): Promise<void> {
+  if (!secretStore) return;
   const raw = (cfg().get<string>('manualToken') || '').trim();
-  if (!raw) return false;
+  if (!raw) return;
   try {
     await secretStore.store(TOKEN_SECRET, raw);
   } catch (err) {
     log(`保管箱写入失败（${messageOf(err)}）`);
-    return false;
+    return;
   }
   clearingTokenSetting = true;
   try {
@@ -146,7 +147,6 @@ async function sweepManualToken(): Promise<boolean> {
     clearingTokenSetting = false;
   }
   log('手动 Token 已存入加密保管箱，设置项已清空');
-  return true;
 }
 
 async function clearManualTokenSetting(): Promise<void> {
@@ -185,6 +185,8 @@ async function clearManualToken(): Promise<void> {
 }
 
 async function reconfigureAuth(): Promise<void> {
+  // 区域策略先落地：后面读到的 token 用哪套站点由它决定
+  setRegionPolicy(cfg().get('region', 'auto'));
   configureAuth({
     manualToken: await storedManualToken(),
     store: makeTokenStore(),
@@ -224,6 +226,39 @@ function autoCheckinEnabled(): boolean {
   return typeof raw === 'boolean' ? raw : true;
 }
 
+/** 0.1.4 把 buddyTravel 改名 autoTravel：老用户存在旧键里的值要继续认 */
+function autoTravelEnabled(): boolean {
+  const c = cfg();
+  const v = c.get<unknown>('autoTravel');
+  if (typeof v === 'boolean') return v;
+  const legacy = c.get<unknown>('buddyTravel');
+  return typeof legacy === 'boolean' ? legacy : true;
+}
+
+/**
+ * 把旧键 buddyTravel 的值搬到 autoTravel，搬完把旧键从 settings.json 里清掉——
+ * 不清的话它会一直挂着「未知的配置设置」提示。只做回退读取的话，设置页会显示
+ * 默认值、实际却按旧键关着，两边对不上；搬一次之后旧键就彻底退役。
+ */
+async function migrateAutoTravelSetting(): Promise<void> {
+  try {
+    const c = cfg();
+    const legacy = c.inspect<unknown>('buddyTravel');
+    const hasLegacy = legacy?.globalValue !== undefined || legacy?.workspaceValue !== undefined;
+    if (!hasLegacy) return;
+    const legacyValue = legacy?.globalValue ?? legacy?.workspaceValue;
+    if (c.get<unknown>('autoTravel') === undefined && typeof legacyValue === 'boolean') {
+      await c.update('autoTravel', legacyValue, vscode.ConfigurationTarget.Global);
+      log(`已把旧设置 buddyTravel=${legacyValue} 迁移为 autoTravel`);
+    }
+    if (legacy?.globalValue !== undefined) await c.update('buddyTravel', undefined, vscode.ConfigurationTarget.Global);
+    if (legacy?.workspaceValue !== undefined) await c.update('buddyTravel', undefined, vscode.ConfigurationTarget.Workspace);
+  } catch (err) {
+    // 迁移失败不能拖垮启动刷新：回退读取还在，行为不会错
+    log(`旧设置迁移失败（${messageOf(err)}），本次仍按旧键读取`);
+  }
+}
+
 function clearCheckinTimer(): void {
   if (checkinTimer) {
     clearTimeout(checkinTimer);
@@ -256,14 +291,14 @@ function renderStatusBar(): void {
   const hhmm = new Date(lastFetchedAt || Date.now()).toTimeString().slice(0, 5);
   // 跨天后旧签到状态作废，回落「签到未查询」（对齐 traecn）
   const checkin = lastCheckinDay === todayString() ? lastCheckinState : 'unknown';
-  const data = buildPanelData(lastSummary, checkin, hhmm);
-  statusBar.text = lastSummary.unlimited
-    ? '$(codebuddy-sparkle) ∞'
-    : `$(codebuddy-sparkle) ${fmtCredits(lastSummary.remain)} (${data.pct}%)`;
+  const data = buildPanelData(lastSummary, checkin, hhmm, lastAccountName, cfg().get<boolean>('planPackFirst', true));
+  const amount = lastSummary.unlimited ? '不限量' : fmtCredits(lastSummary.remain);
+  statusBar.text = `$(codebuddy-sparkle) ${amount} (${data.pct}%)`;
   const md = new vscode.MarkdownString(buildTooltipMarkdown(data, {
     detailRows: clampDetailRows(cfg().get('detailRows', 3)),
     appName: vscode.env?.appName,
-    theme: themeKind()
+    theme: themeKind(),
+    intl: lastIntl
   }));
   md.isTrusted = true;
   md.supportHtml = true;
@@ -289,14 +324,24 @@ async function refresh(verbose: boolean): Promise<void> {
   refreshing = true;
   try {
     statusBar.text = '$(sync~spin) 刷新中…';
-    const auth = await getAuth();
+    // 手动刷新强制重读宿主登录态：切号后不用等冷却，点一下就是新账号
+    const auth = await getAuth(verbose);
     if (auth.mode === 'none') {
       renderErrorStatus('未找到登录凭据。请在当前编辑器里登录 CodeBuddy 扩展，或在设置项 codebuddyquota.manualToken 填一次 accessToken');
       return;
     }
+    if (lastAuthMode === 'manual' && auth.mode === 'auto') {
+      const who = auth.token ? accountLabel(auth.token) : '';
+      log(`已恢复从当前编辑器读取登录态${who ? `（${who}）` : ''}`);
+    } else if (lastAuthMode && lastAuthMode !== 'manual' && auth.mode === 'manual') {
+      log('当前编辑器读不到登录态，改用保管箱里的手动 Token');
+    }
+    lastAuthMode = auth.mode;
+    // 国际站没有签到活动、也没有喵喵旅行：签到按「活动未开启」展示，旅行整块跳过
+    const intl = isInternationalAuth(auth);
     const accountKey = accountKeyOf(auth.token);
-    const autoCheckin = autoCheckinEnabled();
-    const buddyTravel = cfg().get<boolean>('buddyTravel', true);
+    const autoCheckin = autoCheckinEnabled() && !intl;
+    const autoTravel = autoTravelEnabled() && !intl;
 
     const checkinP = autoCheckin
       ? ensureCheckin(auth, { status: fetchCheckinStatus, checkin: doCheckin }, guardFor(LAST_CHECKIN_DATE_KEY, accountKey))
@@ -304,12 +349,13 @@ async function refresh(verbose: boolean): Promise<void> {
     const buddyP = ensureBuddy(
       auth,
       { status: fetchBuddyStatus, claim: claimBuddy, depart: departBuddy, rewardCredit: fetchTravelRewardCredit },
-      buddyTravel,
+      autoTravel,
       guardFor(LAST_BUDDY_DEPART_DATE_KEY, accountKey)
     );
 
     const [checkin, buddy] = await Promise.all([checkinP, buddyP]);
-    lastCheckinState = checkin.state;
+    // 国际站不查签到：固定显示「签到活动未开启」，别被 checkinP 的 unknown 覆盖
+    lastCheckinState = intl ? 'disabled' : checkin.state;
     lastCheckinDay = todayString();
     if (checkin.state === 'claimed' || checkin.state === 'unclaimed') {
       clearCheckinTimer();
@@ -332,6 +378,8 @@ async function refresh(verbose: boolean): Promise<void> {
 
     const summary = await fetchUsage(auth);
     lastSummary = summary;
+    lastIntl = intl;
+    lastAccountName = (auth.token && jwtStringClaim(auth.token, 'nickname')) || '';
     lastFetchedAt = Date.now();
     renderStatusBar();
     if (verbose) {
@@ -343,6 +391,8 @@ async function refresh(verbose: boolean): Promise<void> {
     const msg = messageOf(err);
     // 丢掉上一轮数据：否则失败后换主题/改 detailRows 会按旧数据重绘，把错误提示盖掉
     lastSummary = undefined;
+    lastIntl = false;
+    lastAccountName = '';
     if (api.code === 'NO_CREDENTIALS') renderErrorStatus('未找到登录凭据');
     else if (api.code === 'AUTH_EXPIRED') {
       invalidateAuth(true);
@@ -373,9 +423,13 @@ async function manualCheckin(): Promise<void> {
   }
   claiming = true;
   try {
-    const auth = await getAuth();
+    const auth = await getAuth(true);
     if (auth.mode === 'none') {
       vscode.window.showWarningMessage('CodeBuddy Quota：未找到登录凭据，无法签到');
+      return;
+    }
+    if (isInternationalAuth(auth)) {
+      vscode.window.showInformationMessage('CodeBuddy Quota：国际版账号没有签到活动');
       return;
     }
     const guard = guardFor(LAST_CHECKIN_DATE_KEY, accountKeyOf(auth.token));
@@ -432,6 +486,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (!event.affectsConfiguration('codebuddyquota')) return;
       const tokenChanged = event.affectsConfiguration('codebuddyquota.manualToken');
+      const regionChanged = event.affectsConfiguration('codebuddyquota.region');
       const tokenStillSet = (cfg().get<string>('manualToken') || '').trim() !== '';
       // 自己清空设置项荡回来的回声不需要做任何事（其它窗口认不出回声，代价只是多刷一次）
       if (tokenChanged && clearingTokenSetting && !tokenStillSet) return;
@@ -441,9 +496,10 @@ export function activate(context: vscode.ExtensionContext): void {
       // 只动了领取开关（既不影响渲染也不影响取数）时整轮跳过：拨一次开关就打一次接口是打扰
       const noEffectOnly = !tokenChanged && !refreshKeyChanged
         && NO_EFFECT_KEYS.some((key) => event.affectsConfiguration(`codebuddyquota.${key}`));
-      // detailRows 只影响展示：用上次数据重绘、不再打接口；优先级高于下面 noEffect 的短路
+      // detailRows / planPackFirst 只影响展示：用上次数据重绘、不再打接口；优先级高于下面 noEffect 的短路
       const displayOnly = !tokenChanged && !refreshKeyChanged
-        && event.affectsConfiguration('codebuddyquota.detailRows');
+        && (event.affectsConfiguration('codebuddyquota.detailRows')
+          || event.affectsConfiguration('codebuddyquota.planPackFirst'));
       void (async () => {
         if (displayOnly) {
           renderStatusBar();
@@ -451,7 +507,8 @@ export function activate(context: vscode.ExtensionContext): void {
         }
         if (noEffectOnly) return;
         if (tokenChanged) await sweepManualToken();
-        if (tokenChanged) await reconfigureAuth();
+        // 区域换了也得重新落地策略并清掉探测缓存，否则还会用旧站点
+        if (tokenChanged || regionChanged) await reconfigureAuth();
         scheduleRefresh();
         await refresh(false);
       })().catch((err) => log(`处理设置变更时出错：${messageOf(err)}`));
@@ -461,6 +518,7 @@ export function activate(context: vscode.ExtensionContext): void {
   scheduleRefresh();
 
   void (async () => {
+    await migrateAutoTravelSetting();
     await sweepManualToken();
     await reconfigureAuth();
     resetBuddyState();
@@ -469,7 +527,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // 宿主识别诊断：浮窗页脚底距按 appName 分流，若底距不对，先看这行的实际值
     log(`宿主 appName="${vscode.env.appName}"，浮窗页脚底距补偿 hostPad=${hostPad}`);
     // 冷启动补偿：当天还没领成（比如编辑器整天没开过）时排一次当天 23:50 的兜底
-    if (autoCheckinEnabled() && auth.mode !== 'none') {
+    if (autoCheckinEnabled() && auth.mode !== 'none' && !isInternationalAuth(auth)) {
       const guard = guardFor(LAST_CHECKIN_DATE_KEY, accountKeyOf(auth.token));
       if (shouldCheckin(guard.lastDate(), todayString())) {
         scheduleCheckinRetry();
