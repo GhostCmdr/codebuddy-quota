@@ -19,7 +19,7 @@ permissions:
 
 # 连续两次推送时排队执行，避免同时判定「tag 不存在」而重复建 tag
 concurrency:
-  group: release-${{ github.ref }}
+  group: changelog-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -52,7 +52,8 @@ jobs:
           echo "CHANGELOG 顶部版本：$top"
           echo "参与判定的版本：${versions[*]}"
 
-          norm() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(s.replace(/\s+$/,"")))'; }
+          # 比对前去掉首尾空白：Release 正文与 CHANGELOG 段落常差一个开头/结尾空行
+          norm() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(s.replace(/^\s+|\s+$/g,"")))'; }
 
           publish=false
           notes_versions=""
