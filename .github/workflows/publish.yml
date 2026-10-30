@@ -16,6 +16,7 @@ permissions:
 
 jobs:
   publish:
+    name: 打包并上架市场
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

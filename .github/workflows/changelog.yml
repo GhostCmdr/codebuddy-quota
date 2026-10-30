@@ -1,5 +1,8 @@
 name: 推送校验自动化
 
+# 运行标题：手动触发时写清「手动发布校验 / 手动补发」，push 时沿用提交信息
+run-name: ${{ github.event_name == 'workflow_dispatch' && (inputs.force_publish == true && '手动补发' || '手动运行发布校验') || github.event.head_commit.message }}
+
 # 只在 CHANGELOG 有改动时启动：日常改代码推送不会触发任何发布动作。
 on:
   push:
@@ -29,9 +32,11 @@ jobs:
   #  - 说明比对覆盖 CHANGELOG 最新的两个版本，更早的版本不动
   gate:
     runs-on: ubuntu-latest
+    name: 判定该做什么
     outputs:
       publish: ${{ steps.decide.outputs.publish }}
       notes_versions: ${{ steps.decide.outputs.notes_versions }}
+      label: ${{ steps.decide.outputs.label }}
     steps:
       - uses: actions/checkout@v4
 
@@ -105,11 +110,33 @@ jobs:
             echo "手动要求按当前版本重新发布 $top。"
           fi
 
+          trimmed_notes="${notes_versions# }"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
-          echo "notes_versions=${notes_versions# }" >> "$GITHUB_OUTPUT"
+          echo "notes_versions=$trimmed_notes" >> "$GITHUB_OUTPUT"
+
+          # 给人看的结论：写进任务名和运行摘要
+          if [ "$publish" = "true" ] && [ -n "$trimmed_notes" ]; then
+            label="发布 $top 到市场，并更新 $trimmed_notes 的说明"
+          elif [ "$publish" = "true" ]; then
+            label="发布 $top 到市场"
+          elif [ -n "$trimmed_notes" ]; then
+            label="更新 $trimmed_notes 的 Release 说明"
+          else
+            label="无需发布"
+          fi
+          echo "label=$label" >> "$GITHUB_OUTPUT"
+          {
+            echo "## $label"
+            echo
+            echo "- 顶部版本：$top"
+            echo "- 判定范围：${versions[*]}"
+            echo "- 正式发布：$publish"
+            [ -n "$trimmed_notes" ] && echo "- 待更新说明：$trimmed_notes"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # 只同步说明：不动 tag、不重打包、不发市场
   notes:
+    name: 同步 Release 说明：${{ needs.gate.outputs.notes_versions }}
     needs: gate
     if: needs.gate.outputs.notes_versions != ''
     runs-on: ubuntu-latest
@@ -132,6 +159,7 @@ jobs:
 
   # 复用 publish.yml 的发布步骤：单测 → 打包 → 建 tag/Release → 发两个市场
   publish:
+    name: ${{ needs.gate.outputs.label }}
     needs: gate
     if: needs.gate.outputs.publish == 'true'
     uses: ./.github/workflows/publish.yml
