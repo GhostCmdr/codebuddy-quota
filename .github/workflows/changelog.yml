@@ -1,7 +1,7 @@
-name: 更新说明与发布
+name: changelog
 
-# 手动触发显示「changelog #N: Manually run by 某人」；push 显示提交信息
-run-name: "${{ github.event_name == 'workflow_dispatch' && format('changelog #{0}: Manually run by {1}', github.run_number, github.actor) || github.event.head_commit.message }}"
+# 列表粗体标题固定写成动作名；副标题由 GitHub 自动拼成「changelog #N: …」
+run-name: 更新说明与发布
 
 # CHANGELOG 有改动才启动：判断是「只更新 Release 说明」还是「发布新版本」。
 # 手动运行并勾 force_publish 用于补发当前版本（已存在的市场步骤会自动跳过）。
