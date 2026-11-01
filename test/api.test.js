@@ -80,6 +80,29 @@ test('HTTP 200 但业务 code 非 0 要抛错，正文只进 remoteDetail', asyn
     globalThis.fetch = orig;
   }
 });
+test('业务 code 是字符串时同样按错误处理', async () => {
+  const orig = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ code: '1001', message: 'boom' }) });
+  try {
+    await assert.rejects(() => api.fetchUsage({ mode: 'auto', token: 't' }), (e) => {
+      assert.match(e.message, /业务错误码 1001/);
+      return true;
+    });
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+test('业务 code 是字符串 "0" 时按成功处理', async () => {
+  const orig = globalThis.fetch;
+  const body = { code: '0', data: { Response: { Data: { Accounts: [{ PackageName: 'x', CycleCapacityRemainPrecise: '5', CycleCapacitySizePrecise: '10', CycleEndTime: '' }] } } } };
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => body });
+  try {
+    const s = await api.fetchUsage({ mode: 'auto', token: 't' });
+    assert.strictEqual(s.remain, 5);
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
 test('shapeUsage 无周期字段回落总容量字段', () => {
   const s = api.shapeUsage({ data: { Response: { Data: { Accounts: [{ PackageName: 'x', CapacityRemainPrecise: '5', CapacitySizePrecise: '10', CycleEndTime: '' }] } } } });
   assert.strictEqual(s.remain, 5);
@@ -122,6 +145,11 @@ test('safeSnippet 去掉零宽/双向控制符并按上限截断', () => {
   const out = api.safeSnippet(`a\u200Bb\u202Ec${'x'.repeat(200)}`, 20);
   assert.ok(!/[\u200B-\u200F\u202A-\u202E]/.test(out));
   assert.strictEqual(out.length, 20);
+});
+test('safeSnippet 截断点落在代理对中间时不留半个字符', () => {
+  const out = api.safeSnippet('a😀b', 2);
+  assert.strictEqual(out, 'a');
+  assert.ok(!/[\uD800-\uDBFF]$/.test(out));
 });
 test('apiError 把远程正文放进 remoteDetail 而不是 message', () => {
   const e = api.apiError('请求积分接口返回 HTTP 502', { remoteBody: 'boom https://a.b [x](y)', httpStatus: 502 });

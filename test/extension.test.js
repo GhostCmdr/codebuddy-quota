@@ -162,6 +162,7 @@ function loadHarness(options = {}) {
 
   return {
     ext, context, statusItems, notifications, fetchCalls, configWrites, commands, state, secrets,
+    setConfig(key, value) { scopeValues.global[key] = value; },
     setResponder(next) { responder = next; },
     fireThemeChange() { if (themeHandler) themeHandler(); },
     fireConfigChange(changedKeys) {
@@ -537,6 +538,57 @@ test('保管箱读取挂住时按超时放行，状态栏不会被永久钉住',
     t.mock.timers.tick(6000);
     await drain(60);
     assert.match(String(h.statusItems[0].tooltip), /未找到登录凭据/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('打开自动签到后补建当天兜底定时器', async (t) => {
+  const day = new Date('2026-10-07T10:00:00+08:00').getTime();
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: day });
+  const h = loadHarness({ config: { autoCheckin: false, refreshInterval: 0 }, secrets: { manualToken: freshToken(3 * 86400) } });
+  try {
+    h.ext.activate(h.context);
+    await settle(() => h.statusItems[0].text.includes('760'));
+    assert.strictEqual(h.fetchCalls.filter((u) => u.includes('daily-checkin')).length, 0, '关闭时不该签到');
+    h.setConfig('autoCheckin', true);
+    h.fireConfigChange(['codebuddyquota.autoCheckin']);
+    await drain();
+    // 什么都不做，直接到 23:50 之后：只有补建的兜底定时器会发起签到
+    t.mock.timers.tick((13 * 60 + 50) * 60 * 1000 + 1000);
+    await drain(60);
+    const after = h.fetchCalls.filter((u) => u.includes('daily-checkin')).length;
+    assert.ok(after >= 1, `到点后应补签，实际 ${after}`);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('签到命令撞上进行中的刷新会排队补刷', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const h = loadHarness({ secrets: { manualToken: freshToken() } });
+  try {
+    h.ext.activate(h.context);
+    await settle(() => h.statusItems[0].text.includes('760'));
+    let real = 0;
+    const base = defaultResponder();
+    h.setResponder(async (url, init) => {
+      if (String(url).includes('get-user-resource')) {
+        if (String(init && init.body ? init.body : '').includes('"PageSize":200')) real++;
+        await gate;
+      }
+      return base(url, init);
+    });
+    const first = h.commands.get('codebuddyquota.refresh')();
+    await drain();
+    // 刷新挂住期间点手动签到：今天已领 → 只提示 + 补刷，补刷要排队而不是被丢掉
+    await h.commands.get('codebuddyquota.checkin')();
+    assert.ok(h.notifications.info.some((m) => /正在刷新中/.test(m)), '应提示正在刷新');
+    release();
+    await first;
+    await settle(() => real >= 2);
+    assert.ok(real >= 2, `补刷应再取一次数，实际 ${real}`);
   } finally {
     h.cleanup();
   }

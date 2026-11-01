@@ -34,3 +34,30 @@ test('达上限不出发但仍领取', async () => {
   assert.strictEqual(calls.depart, 0);
   assert.strictEqual(r.claimedCredit, 6);
 });
+test('没有实际出发时只查一次状态', async () => {
+  let statusCalls = 0;
+  const api = {
+    status: async () => { statusCalls++; return { state: 'traveling' }; },
+    claim: async () => ({ claimed: true }),
+    depart: async () => ({ hours: 1 }),
+    rewardCredit: async () => undefined
+  };
+  claim.resetBuddyState();
+  await claim.ensureBuddy(AUTH, api, true);
+  assert.strictEqual(statusCalls, 1);
+});
+
+test('出发失败不写当天守卫，当天还会再试', async () => {
+  let recorded = 0;
+  const guard = { lastDate: () => undefined, record: async () => { recorded++; } };
+  const api = {
+    status: async () => ({ state: 'arrived', departAt: 9, dailyLimitReached: false }),
+    claim: async () => ({ claimed: true, credit: 0 }),
+    depart: async () => ({ error: 'boom' }),
+    rewardCredit: async () => undefined
+  };
+  claim.resetBuddyState();
+  const r = await claim.ensureBuddy(AUTH, api, true, guard);
+  assert.strictEqual(r.error, 'boom');
+  assert.strictEqual(recorded, 0, '出发失败不该占用当天名额');
+});

@@ -41,28 +41,26 @@ export function extractAccessToken(plain: string): string | undefined {
   return m?.[1];
 }
 
-export function jwtExpiry(token: string): number | undefined {
+/** JWT 的第二段（payload）；解不开一律 undefined */
+function jwtPayload(token: string): any {
   const segment = token.split('.')[1];
   if (!segment) return undefined;
   try {
-    const json = JSON.parse(Buffer.from(segment.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
-    return typeof json?.exp === 'number' ? json.exp * 1000 : undefined;
+    return JSON.parse(Buffer.from(segment.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
   } catch {
     return undefined;
   }
 }
 
+export function jwtExpiry(token: string): number | undefined {
+  const json = jwtPayload(token);
+  return typeof json?.exp === 'number' ? json.exp * 1000 : undefined;
+}
+
 /** 解析 JWT 的字符串声明（昵称等）；非 JWT、字段缺失或不是非空字符串都返回 undefined */
 export function jwtStringClaim(token: string, claim: string): string | undefined {
-  const segment = token.split('.')[1];
-  if (!segment) return undefined;
-  try {
-    const json = JSON.parse(Buffer.from(segment.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
-    const value = json?.[claim];
-    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-  } catch {
-    return undefined;
-  }
+  const value = jwtPayload(token)?.[claim];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
 export function parseEncryptedKey(localState: string): { protectedKey?: Buffer; error?: string } {
@@ -84,6 +82,12 @@ function powershellPath(): string {
   return fs.existsSync(full) ? full : 'powershell.exe';
 }
 
+/**
+ * DPAPI 解出的主机密钥在同一个 profile 里是稳定的：按 encrypted_key 原文缓存，
+ * 避免每次刷新都起一次 PowerShell（每次约几百 ms，且会拉高后台 CPU）。
+ */
+let dpapiCache: { inputB64: string; key: Buffer } | undefined;
+
 export async function readWindowsKey(localStatePath: string): Promise<{ key?: Buffer; error?: string }> {
   let state: string;
   try {
@@ -93,10 +97,12 @@ export async function readWindowsKey(localStatePath: string): Promise<{ key?: Bu
   }
   const parsed = parseEncryptedKey(state);
   if (!parsed.protectedKey) return { error: parsed.error ?? 'encrypted_key missing' };
+  const inputB64 = parsed.protectedKey.toString('base64');
+  if (dpapiCache?.inputB64 === inputB64) return { key: dpapiCache.key };
   const script = [
     "$ErrorActionPreference='Stop'",
     'Add-Type -AssemblyName System.Security',
-    `$b=[Convert]::FromBase64String('${parsed.protectedKey.toString('base64')}')`,
+    `$b=[Convert]::FromBase64String('${inputB64}')`,
     '$k=[System.Security.Cryptography.ProtectedData]::Unprotect($b,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser)',
     '[Console]::Out.Write([Convert]::ToBase64String($k))'
   ].join(';');
@@ -104,7 +110,9 @@ export async function readWindowsKey(localStatePath: string): Promise<{ key?: Bu
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
     const { stdout } = await execFileAsync(powershellPath(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { timeout: 60000 });
     const key = Buffer.from(String(stdout).trim(), 'base64');
-    return key.length ? { key } : { error: 'DPAPI returned empty key' };
+    if (!key.length) return { error: 'DPAPI returned empty key' };
+    dpapiCache = { inputB64, key };
+    return { key };
   } catch (e) {
     const detail = String((e as any)?.stderr ?? (e as Error)?.message ?? e).trim().split(/\r?\n/).filter(Boolean).slice(-1)[0];
     return { error: `DPAPI failed: ${(detail ?? '').slice(0, 120)}` };

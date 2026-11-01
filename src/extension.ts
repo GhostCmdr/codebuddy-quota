@@ -281,6 +281,25 @@ function scheduleCheckinRetry(): void {
   }, delayMs);
 }
 
+/**
+ * 自动签到开关拨动后同步当天的兜底定时器：开 → 今天还没领成就排上，关 → 立刻清掉。
+ * 只读本地凭据与日期守卫，不发任何请求。
+ */
+async function syncCheckinTimer(): Promise<void> {
+  if (!autoCheckinEnabled()) {
+    clearCheckinTimer();
+    return;
+  }
+  const auth = await getAuth();
+  if (auth.mode === 'none' || isInternationalAuth(auth)) {
+    clearCheckinTimer();
+    return;
+  }
+  const guard = guardFor(LAST_CHECKIN_DATE_KEY, accountKeyOf(auth.token));
+  if (shouldCheckin(guard.lastDate(), todayString())) scheduleCheckinRetry();
+  else clearCheckinTimer();
+}
+
 function themeKind(): 'light' | 'dark' {
   const kind = vscode.window.activeColorTheme.kind;
   return kind === vscode.ColorThemeKind.Light || kind === vscode.ColorThemeKind.HighContrastLight ? 'light' : 'dark';
@@ -315,10 +334,12 @@ function renderErrorStatus(msg: string): void {
   statusBar.show();
 }
 
-async function refresh(verbose: boolean): Promise<void> {
+async function refresh(verbose: boolean, queueWhenBusy = false): Promise<void> {
   if (refreshing) {
+    // 自动刷新合并成一次；手动刷新/签到后的补刷即使撞上进行中的刷新也要排队，
+    // 否则面板会停在旧的签到状态（签到本身已经成功）
+    if (queueWhenBusy || !verbose) pendingRefresh = true;
     if (verbose) vscode.window.showInformationMessage('CodeBuddy Quota：正在刷新中');
-    else pendingRefresh = true;
     return;
   }
   refreshing = true;
@@ -436,7 +457,7 @@ async function manualCheckin(): Promise<void> {
     const day = todayString();
     if (!shouldCheckin(guard.lastDate(), day)) {
       vscode.window.showInformationMessage('CodeBuddy Quota：今日已签到，无需重复领取');
-      await refresh(true);
+      await refresh(true, true);
       return;
     }
     const r = await ensureCheckin(auth, { status: fetchCheckinStatus, checkin: doCheckin }, guard);
@@ -447,7 +468,7 @@ async function manualCheckin(): Promise<void> {
       const tag = who ? `（${who}）` : '';
       log(`${day} 手动签到成功${tag}`);
       vscode.window.showInformationMessage(`CodeBuddy Quota：签到成功${tag}`);
-      await refresh(true);
+      await refresh(true, true);
     } else {
       log(`${day} 手动签到失败${r.error ? `：${r.error}` : ''}`);
       vscode.window.showErrorMessage(`CodeBuddy Quota：签到失败${r.error ? `：${r.error}` : ''}`);
@@ -487,6 +508,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!event.affectsConfiguration('codebuddyquota')) return;
       const tokenChanged = event.affectsConfiguration('codebuddyquota.manualToken');
       const regionChanged = event.affectsConfiguration('codebuddyquota.region');
+      const autoCheckinChanged = event.affectsConfiguration('codebuddyquota.autoCheckin');
       const tokenStillSet = (cfg().get<string>('manualToken') || '').trim() !== '';
       // 自己清空设置项荡回来的回声不需要做任何事（其它窗口认不出回声，代价只是多刷一次）
       if (tokenChanged && clearingTokenSetting && !tokenStillSet) return;
@@ -501,6 +523,8 @@ export function activate(context: vscode.ExtensionContext): void {
         && (event.affectsConfiguration('codebuddyquota.detailRows')
           || event.affectsConfiguration('codebuddyquota.planPackFirst'));
       void (async () => {
+        // 开关拨动后同步当天的兜底定时器：打开时补建、关闭时清掉（不发请求）
+        if (autoCheckinChanged) await syncCheckinTimer();
         if (displayOnly) {
           renderStatusBar();
           return;

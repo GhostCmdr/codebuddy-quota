@@ -38,6 +38,17 @@ function num(s: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** 业务码统一成数字：接口偶尔会把 code 包成字符串，"0" 不能当业务失败 */
+function apiCode(json: unknown): number {
+  const code = (json as any)?.code;
+  if (typeof code === 'number') return code;
+  if (typeof code === 'string' && code.trim() !== '') {
+    const n = Number(code);
+    if (Number.isFinite(n)) return n;
+  }
+  return NaN;
+}
+
 function attrValue(a: any, key: string): string | undefined {
   const hit = (a?.AccountAttributes ?? []).find((x: any) => x?.Key === key);
   return typeof hit?.Value === 'string' && hit.Value ? hit.Value : undefined;
@@ -110,7 +121,7 @@ export function shapeCheckinStatus(json: unknown): 'claimed' | 'unclaimed' {
 }
 
 export function shapeBuddyStatus(json: unknown): BuddyStatus | null {
-  if ((json as any)?.code !== 0) return null;
+  if (apiCode(json) !== 0) return null;
   const d = (json as any)?.data ?? {};
   return {
     state: d.state,
@@ -143,7 +154,9 @@ export function safeSnippet(text: string, max = 80): string {
   for (const ch of UI_UNSAFE_CHARS) {
     out = out.split(ch).join('');
   }
-  return out.replace(WHITESPACE_RE, ' ').trim().slice(0, max);
+  const cut = out.replace(WHITESPACE_RE, ' ').trim().slice(0, max);
+  // 截断点落在代理对中间时丢掉半个字符，别把 U+FFFD 摆到日志里
+  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
 }
 
 export interface ApiError extends Error {
@@ -251,8 +264,9 @@ export async function fetchUsage(auth: Auth): Promise<CreditsSummary> {
   if (!resp.ok) throw apiError(`请求积分接口返回 HTTP ${resp.status}`, { httpStatus: resp.status });
   const json: any = await resp.json();
   // HTTP 200 也可能是业务失败：这时 data 是空的，直接当成功会把「取数失败」显示成 0/0
-  if (typeof json?.code === 'number' && json.code !== 0) {
-    throw apiError(`积分接口返回业务错误码 ${json.code}`, { remoteBody: JSON.stringify(json), httpStatus: resp.status });
+  const code = apiCode(json);
+  if (Number.isFinite(code) && code !== 0) {
+    throw apiError(`积分接口返回业务错误码 ${code}`, { remoteBody: JSON.stringify(json), httpStatus: resp.status });
   }
   return shapeUsage(json);
 }
@@ -261,7 +275,7 @@ export async function fetchCheckinStatus(auth: Auth): Promise<'claimed' | 'uncla
   const base = billingBase(auth);
   const resp = await authFetch(`${base}/billing/meter/checkin-status`, { method: 'POST', headers: billingHeaders(base), body: '{}' }, auth);
   const json = await resp.json().catch(() => null);
-  if (json?.code === 10001) return 'claimed';
+  if (apiCode(json) === 10001) return 'claimed';
   if (!resp.ok) return 'unknown';
   return shapeCheckinStatus(json);
 }
@@ -271,9 +285,9 @@ export async function doCheckin(auth: Auth): Promise<CheckinResult> {
   const resp = await authFetch(`${base}/billing/meter/daily-checkin`, { method: 'POST', headers: billingHeaders(base), body: '{}' }, auth);
   const json = await resp.json().catch(() => null);
   // 10001 = 今天已经领过。良性结果：不算失败，也不该让上层天天重试。
-  if (json?.code === 10001) return { state: 'claimed' };
+  if (apiCode(json) === 10001) return { state: 'claimed' };
   if (!resp.ok) return { state: 'unknown', error: `HTTP_${resp.status}` };
-  if (json?.code === 0) return { state: 'claimed', credit: json?.data?.credit, freshlyClaimed: true };
+  if (apiCode(json) === 0) return { state: 'claimed', credit: json?.data?.credit, freshlyClaimed: true };
   const st = await fetchCheckinStatus(auth);
   return st === 'claimed' ? { state: 'claimed' } : { state: 'unknown', error: `code=${json?.code ?? ''}` };
 }
@@ -296,10 +310,10 @@ export async function fetchBuddyStatus(auth: Auth): Promise<BuddyStatus | null> 
 export async function claimBuddy(auth: Auth): Promise<{ claimed?: boolean; credit?: number; error?: string }> {
   try {
     const j = await callTravel(auth, 'claim', 'POST', '{}');
-    if (j?.code === 0) return { claimed: true, credit: j?.data?.credit };
+    if (apiCode(j) === 0) return { claimed: true, credit: j?.data?.credit };
     const msg = typeof j?.msg === 'string' ? j.msg : '';
     if (/no unclaimed/i.test(msg)) return { credit: 0 };
-    return { error: msg.trim() ? safeSnippet(msg) : `HTTP_${j?.code ?? ''}` };
+    return { error: msg.trim() ? safeSnippet(msg) : `HTTP_${j?.code ?? 'unknown'}` };
   } catch (e) {
     if (isAuthError(e)) throw e;
     return { error: safeSnippet(String((e as Error)?.message ?? e)) };
@@ -309,7 +323,7 @@ export async function claimBuddy(auth: Auth): Promise<{ claimed?: boolean; credi
 export async function departBuddy(auth: Auth, locationId = 1): Promise<{ hours?: number; error?: string }> {
   try {
     const j = await callTravel(auth, 'depart', 'POST', JSON.stringify({ location_id: locationId }));
-    if (j?.code === 0) {
+    if (apiCode(j) === 0) {
       let h = (await fetchBuddyStatus(auth))?.durationHours;
       if (h == null) {
         const dh = j?.data?.duration_hours ?? j?.data?.duration;
@@ -318,7 +332,7 @@ export async function departBuddy(auth: Auth, locationId = 1): Promise<{ hours?:
       return { hours: h != null && h > 0 ? h : 0 };
     }
     const msg = typeof j?.msg === 'string' ? j.msg : '';
-    return { error: msg.trim() ? safeSnippet(msg) : `HTTP_${j?.code ?? ''}` };
+    return { error: msg.trim() ? safeSnippet(msg) : `HTTP_${j?.code ?? 'unknown'}` };
   } catch (e) {
     if (isAuthError(e)) throw e;
     return { error: safeSnippet(String((e as Error)?.message ?? e)) };
@@ -328,7 +342,7 @@ export async function departBuddy(auth: Auth, locationId = 1): Promise<{ hours?:
 export async function fetchTravelRewardCredit(auth: Auth, departAt?: number): Promise<number | undefined> {
   try {
     const j = await callTravel(auth, 'records?page=1&page_size=20', 'GET');
-    if (j?.code !== 0) return undefined;
+    if (apiCode(j) !== 0) return undefined;
     const recs: any[] = j?.data?.records ?? [];
     if (!recs.length) return undefined;
     const hit = departAt != null ? recs.find((r: any) => r.depart_at === departAt) : undefined;

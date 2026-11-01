@@ -89,17 +89,22 @@ export async function ensureBuddy(
   }
   const today = todayString();
   const canDepart = backFromTravel && !status.dailyLimitReached;
+  let departed = false;
   if (canDepart && shouldCheckin(guard?.lastDate(), today)) {
     try {
       const d = await api.depart(auth);
       if (d.error) result.error = result.error ?? d.error;
-      else result.departedHours = d.hours ?? 0;
-      await guard?.record(today);
+      else {
+        result.departedHours = d.hours ?? 0;
+        departed = true;
+        // 只有真的派出去了才算今天做过；失败保持原样，下一次刷新自然重试（与签到一致）
+        await guard?.record(today);
+      }
     } catch {
       result.error = result.error ?? 'depart failed';
     }
   }
-  const st2 = await api.status(auth);
-  lastBuddyWasTraveling = (st2?.state ?? status.state) === 'traveling';
+  // 只有出发成功才会改变旅行状态；没出发就沿用本轮读到的状态，不再多发一次 status
+  lastBuddyWasTraveling = departed || isTraveling;
   return result;
 }
